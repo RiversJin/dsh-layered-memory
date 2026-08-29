@@ -946,7 +946,7 @@ async function main(): Promise<void> {
       const t = Date.now();
       await l1T.appendNew([{ id: 'tool-r1', content: '用户偏好 emoji 回复', type: 'instruction', priority: 90, scene_name: '偏好', timestamps: [t], createdAt: t, updatedAt: t }]);
 
-      const specs: Record<string, { execute: (args: Record<string, unknown>, exec: { agent?: { id?: string } }) => Promise<Record<string, unknown>>; output: { render: (_a: unknown, v: Record<string, unknown>) => Array<{ type: string; text: string }> } }> = {};
+      const specs: Record<string, { description: string; execute: (args: Record<string, unknown>, exec: { agent?: { id?: string } }) => Promise<Record<string, unknown>>; output: { render: (_a: unknown, v: Record<string, unknown>) => Array<{ type: string; text: string }> } }> = {};
       const ctxT = {
         tools: {
           register: (spec: { name: string }) => {
@@ -958,6 +958,11 @@ async function main(): Promise<void> {
       const toolGlobalRecall = { value: true };
       registerMemoryTools(ctxT, { tools: true } as never, { l0: l0T, l1: l1T, scenes: scenesT, persona: personaT }, silentLogger, modesT, { supported: true, get: () => ({ recall: toolGlobalRecall.value }) } as never);
       assert(Object.keys(specs).length === 4 && !!specs['memory_commit'], '四工具注册（含显式 memory_commit）');
+      assert(
+        specs['memory_search'].description.includes('每轮合计最多调用 3 次')
+        && specs['conversation_search'].description.includes('每轮合计最多调用 3 次'),
+        'L0/L1 选择与合计搜索上限归入工具说明',
+      );
 
       const ms = await specs['memory_search'].execute({ query: 'emoji' }, { agent: { id: 'sess-off' } });
       assert((ms.items as unknown[]).length === 0 && typeof ms.notice === 'string' && (ms.notice as string).includes('隐身'), `off 档 memory_search 返回统一提示（非空结果集）`);
@@ -1737,8 +1742,9 @@ async function main(): Promise<void> {
       );
       const injText = inj?.content?.[0]?.text ?? '';
       assert(
-        injText.includes('<relevant-memories>') && injText.includes('不代表当前任务进程，仅作为参考') && injText.includes('[persona|闲聊] 命中记忆内容'),
-        '注入文本：<relevant-memories> 包裹 + 引导语 + 命中行',
+        injText.includes('<relevant-memories>') && injText.includes('不代表当前任务进程，仅作为参考')
+        && injText.includes('[persona|闲聊] 命中记忆内容') && !injText.includes('<memory-tools-guide>'),
+        '注入文本仅含相关记忆，不重复注入工具指南',
       );
       assert(d1.kind === 'enter' && d1.messages[1] === userMsg, '注入消息排在用户消息之前，原消息保持引用不变');
 
@@ -1834,15 +1840,16 @@ async function main(): Promise<void> {
         '旧文件无 recall 键 → 覆盖空、解析跟随全局',
       );
 
-      // ⑥ 指南三条件门控：有本轮召回命中（① 设置）→ 即便画像/导航全空也注入指南
-      assert((contextText['memory:profile']() ?? '').includes('记忆工具调用指南'), '本轮有召回命中 → 指南注入（画像/导航为空）');
+      // ⑥ 工具用法只在 schema；画像/导航为空时稳定区始终为空，
+      // 不再随 lastHits 在 system-prompt 中开关并制造状态快照抖动。
+      assert((contextText['memory:profile']() ?? '') === '', '本轮有召回命中但稳定内容为空 → system-prompt 保持空');
 
       // ⑥b 占用账本联动（票03）：双通道入账、OFF 即时清零、切回净回补、压缩复位
       const occT5 = recallT5.occupancy('agent-t5');
       assert(
-        occT5 !== null && occT5.profileTokens > 0 && occT5.recallTokens > 0
-        && occT5.stockTokens === occT5.profileTokens + occT5.recallTokens,
-        '占用账本：稳定区与召回双通道入账，stock 恒等式成立',
+        occT5 !== null && occT5.profileTokens === 0 && occT5.recallTokens > 0
+        && occT5.stockTokens === occT5.recallTokens,
+        '占用账本：空稳定区不入账，召回消息入 recall 通道',
       );
       assert(occT5 !== null && occT5.lastInjectTokens > 0, '占用账本：lastInject 记录最近一轮注入增量');
       const recallShareT5 = occT5!.recallTokens;
@@ -1850,8 +1857,8 @@ async function main(): Promise<void> {
       assert((contextText['memory:profile']() ?? '') === '', 'OFF 边界：稳定区组装即返回空串');
       assert(occT5 !== null && occT5.profileTokens === 0 && occT5.stockTokens === recallShareT5, 'OFF 边界：profile 份额同边界清零，召回留存（既定事实可见）');
       modesT5.set('agent-t5', 'auto');
-      assert((contextText['memory:profile']() ?? '').includes('记忆工具调用指南'), '切回 auto：稳定区重新组进');
-      assert(occT5 !== null && occT5.profileTokens > 0 && occT5.stockTokens === occT5.profileTokens + recallShareT5, '切回 auto：份额净额回补，恒等式保持');
+      assert((contextText['memory:profile']() ?? '') === '', '切回 auto：无画像/导航时稳定区仍为空');
+      assert(occT5 !== null && occT5.profileTokens === 0 && occT5.stockTokens === recallShareT5, '切回 auto：空稳定区不产生虚假份额');
 
       // ⑥c 流水持久化语义（票07）：agent 销毁不删流水，occupancy() 复生；compact 复位在复生账本上写穿删除
       disposed?.({ agent: { id: 'agent-t5' } });
@@ -1871,17 +1878,16 @@ async function main(): Promise<void> {
       sessionStart?.({ agent: { id: 'agent-t5' }, source: 'resume' });
       assert(occReborn!.stockTokens === snapResume.stock && occReborn!.profileTokens === snapResume.profile, 'resume/startup 不复位账本（历史仍在，已注入内容模型仍持有）');
 
-      // ⑥d 稳定区估算（票08 旧会话回填）：纯读不记账；指南门控生效；off 为 0
-      // （dispose 已清召回统计 → 先补一次真实注入恢复 lastHits，指南门控才有输入）
+      // ⑥d 稳定区估算（票08 旧会话回填）：纯读不记账；无画像/导航不受召回命中影响；off 为 0
       hitId = 'h3';
       const d9 = await preStep!(
         { agent: { id: 'agent-t5' }, messages: [userMsg] as never, signal: { aborted: false } },
         () => Promise.resolve(enter([userMsg])),
       );
-      assert(d9.kind === 'enter' && d9.messages.length === 2, '⑥d 前置：新 id 注入成功（恢复 lastHits）');
+      assert(d9.kind === 'enter' && d9.messages.length === 2, '⑥d 前置：新 id 注入成功');
       const estProfileBefore = occReborn!.profileTokens;
       const est = recallT5.estimateProfileTokens('agent-t5');
-      assert(est > 0, '稳定区估算：画像空但有召回命中 → 工具指南计入（>0）');
+      assert(est === 0, '稳定区估算：画像空时即使有召回命中也保持 0');
       assert(occReborn!.profileTokens === estProfileBefore, '估算纯读：账本零扰动');
       modesT5.set('agent-t5', 'off');
       assert(recallT5.estimateProfileTokens('agent-t5') === 0, 'off 档估算为 0（物理离场）');
@@ -3839,7 +3845,7 @@ async function main(): Promise<void> {
       const statsH = hooksH.stats('agent-dedup')!;
       assert(statsH.injectedTurns === 2 && statsH.hitTurns === 2, `压制轮仍计检索轮与命中轮（inj=${statsH.injectedTurns} hit=${statsH.hitTurns}）`);
       assert(statsH.suppressedRecalls === 1 && statsH.totalHits === 1, `累计压制/注入计数（sup=${statsH.suppressedRecalls} total=${statsH.totalHits}）`);
-      assert(statsH.lastHits === 0, '全量压制轮 lastHits=0（工具指南门控沿用）');
+      assert(statsH.lastHits === 0, '全量压制轮 lastHits=0（仅作统计，不改变稳定上下文）');
       sessionStartH!({ agent: { id: 'agent-dedup' }, source: 'compact' });
       const r3 = await stepH();
       assert(r3.kind === 'enter' && r3.messages.length === 2, 'compact 后重置 → 重新注入');

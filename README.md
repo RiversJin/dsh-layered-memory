@@ -93,6 +93,9 @@ L1/L2/L3 层级过滤）、层级 × 时间窗口表格（调用数 / 输出与�
 - conversation_search
 - memory_read_scene
 
+工具选择与调用限制直接写在各工具说明中，不另行注入对话或动态 system prompt，避免
+重复占用上下文以及产生反复的状态快照。
+
 真机实录：召回注入与工具调用在对话里的样子——"上下文注入 · memory"行先带出相关记忆，模型再按需调 `memory_read_scene` 读取场景块，凭记忆直接作答：
 
 <p align="center">

@@ -149,7 +149,7 @@ export function registerMemoryTools(ctx, cfg, stores, logger, modes, live, linea
     // ── memory_search: L1 结构化记忆 ──
     ctx.tools.register(defineTool({
         name: 'memory_search',
-        description: '搜索结构化记忆（L1 原子记忆）。返回与查询相关的记忆片段：用户偏好、历史事件、项目事实、任务、规则、工作方法等。',
+        description: '搜索结构化记忆（L1 原子记忆），适合用户偏好、历史事件、项目事实、任务、规则与工作方法；需要具体原话或时间线时改用 conversation_search。两种搜索每轮合计最多调用 3 次；仍无结果时直接按已有信息回答。',
         parameters: {
             query: { type: 'string', required: true, description: '搜索查询文本（自然语言）' },
             limit: { type: 'number', description: '最大返回条数（默认 5）' },
@@ -206,7 +206,7 @@ export function registerMemoryTools(ctx, cfg, stores, logger, modes, live, linea
     // ── conversation_search: L0 原始对话 ──
     ctx.tools.register(defineTool({
         name: 'conversation_search',
-        description: '搜索原始对话历史（L0）。返回带时间戳的原始消息，适用于查找具体消息原文、时间线、上下文细节。',
+        description: '搜索原始对话历史（L0），返回带时间戳的消息，适合具体原话、时间线与上下文细节；结构化偏好、事实、任务或规则优先用 memory_search。两种搜索每轮合计最多调用 3 次；仍无结果时直接按已有信息回答。',
         parameters: {
             query: { type: 'string', required: true, description: '搜索查询文本' },
             limit: { type: 'number', description: '最大返回条数（默认 5）' },

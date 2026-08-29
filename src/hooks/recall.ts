@@ -5,8 +5,8 @@
  *    注入消息携带插件来源（form: 'recall'），对用户可见、随会话历史持久累积——
  *    这就是"记忆生效"的显式提示（dsh-time-context 同款官方范式）。
  *    纯工具步透传；召回超时（recall.timeoutMs 总预算）跳过本轮，绝不阻塞对话。
- * 2. agent/created：在 agent 作用域注册动态上下文 provider（L3 画像 + L2 场景导航 +
- *    工具指南——系统提示只保留稳定内容；指南三条件门控：工具开启 && 有内容）。
+ * 2. agent/created：在 agent 作用域注册动态上下文 provider（仅 L3 画像 + L2 场景导航）。
+ *    记忆工具的选择与调用约束属于工具定义，不重复注入消息或动态系统上下文。
  *
  * 注入内容使用 <relevant-memories> 标签包裹（模型侧语义边界 + 助手回显剥离锚点），
  * 召回预算（单条/整轮）超限截断并引导模型用记忆工具查全文。
@@ -84,25 +84,6 @@ export function buildRecallQuery(
   return text;
 }
 
-const MEMORY_TOOLS_GUIDE = `<memory-tools-guide>
-## 记忆工具调用指南
-
-当上方注入的记忆片段不足以回答用户问题时，可主动调用以下工具获取更多信息：
-
-- **memory_search**：搜索结构化记忆（L1），适用于回忆用户偏好、历史事件、项目事实、任务、规则等。
-- **conversation_search**：搜索原始对话（L0），适用于查找具体消息原文、时间线、上下文细节。
-- **memory_read_scene**：读取记忆文件详情（L2 场景块，如场景目录下的 .md 文件；也可读 persona.md）。
-- **memory_commit**：当用户明确表达稳定偏好、长期规则或值得跨轮次保留的事实时，显式保存一条原子记忆。临时信息不要保存。
-
-### ⚠️ 调用次数限制
-每轮对话中，memory_search 和 conversation_search **合计最多调用 3 次**。
-- 首次搜索无结果时，可换关键词或换工具重试，但总调用次数不要超过 3 次。
-- 若 3 次搜索后仍无结果，说明该信息不在记忆中，请直接根据已有信息回复用户。
-
-注：若当前环境限制直接调用工具（如仅允许代码执行入口），请经由该环境的工具调用机制
-（如 run_code 程序内）使用以上记忆工具。
-</memory-tools-guide>`;
-
 /** 单会话召回统计（悬浮卡信息区数据源；每轮 O(1) 记账，agent/disposed 清理）。
  *  口径声明：这是"注入统计"而非 bench 的离线 recall@k——运行时没有 ground truth，
  *  命中率 = hitTurns / injectedTurns。去重语义（0.8.6）：全量压制轮计入 hitTurns
@@ -158,7 +139,7 @@ export function registerRecall(
   const dedupe = new RecallDedupeStore(dataDir, logger);
   /** 记忆占用流水（账本迁移写穿；重启后历史会话账目由此复生——票07）。 */
   const occupancyStore = new OccupancyStore(dataDir, logger);
-  /** 每 agent 召回统计（工具指南门控读 lastHits；悬浮卡信息区读全量计数）。 */
+  /** 每 agent 召回统计（悬浮卡信息区与诊断使用）。 */
   const recallStats = new Map<string, RecallSessionStats>();
   const statFor = (id: string): RecallSessionStats => {
     let s = recallStats.get(id);
@@ -350,12 +331,7 @@ export function registerRecall(
       mode === 'auto'
         ? formatProfileAuto(profileCache.chat, profileCache.work)
         : formatProfileSingle(profileCache[mode]);
-    const hasRecallHit = (recallStats.get(agentId)?.lastHits ?? 0) > 0;
-    // 指南三条件门控：工具已注册（cfg.tools）&&（稳定内容 ∥ 本轮召回命中）——
-    // 空库用户与关闭工具的用户不付这份固定 token（原版 auto-recall 同款语义）
-    if (!cfg.tools) return body;
-    if (!body && !hasRecallHit) return '';
-    return body ? `${body}\n\n${MEMORY_TOOLS_GUIDE}` : MEMORY_TOOLS_GUIDE;
+    return body;
   };
 
   async function estimateRecallFromStorage(sessionId: string): Promise<number | null> {

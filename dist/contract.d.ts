@@ -89,7 +89,7 @@ export interface RecallSessionStats {
     timeouts: number;
     /** 累计被去重压制的命中条数（同会话已注入过，不重复注入）。 */
     suppressedRecalls: number;
-    /** 最近一轮实际注入条数（0 = 零命中/超时/全量压制；工具指南门控沿用此信号）。 */
+    /** 最近一轮实际注入条数（0 = 零命中/超时/全量压制）。 */
     lastHits: number;
     /** 最近一轮检索耗时 ms。 */
     lastDurationMs: number;

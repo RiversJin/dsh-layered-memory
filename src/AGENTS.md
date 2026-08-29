@@ -24,7 +24,7 @@
 - `hooks/capture.ts` — L0 捕获（session/event turn/end，清洗去噪后落盘 JSONL）。
 - `hooks/recall.ts` — **消息侧注入**（ADR-0001）：pre-step prepend 注册、先 next() 再
   在消息列表头部插入 `form:'recall'` 合成消息（排在用户新消息之前）；agent 作用域上下文
-  只留稳定区（画像/导航/三条件门控的工具指南）。
+  只留稳定区（画像/导航）。工具选择与调用约束只写在 tools schema，不另注入上下文。
 - `pipeline/` — `runner.ts`（优先级任务调度、按会话切片触发、闲置兜底、档位切换同步）
   + `trigger.ts`（触发决策纯函数：渐进阈值/切换动作表/闲置扫描/背景选取——S2 测试缝）
   + `l1.ts` / `l2.ts` / `l3.ts`（各层蒸馏）
@@ -137,7 +137,7 @@
   （更新换 id 天然解除压制）；`agent/session-start` 的 `compact`/`clear` 重置、`resume`
   不重置；只标记模型真实看到的条目（预算截断保留前缀 → 注入 = fresh 的前 lines.length
   条）；统计口径：全量压制轮计入 hitTurns（分母 injectedTurns 仍计全部检索轮，悬浮卡
-  命中率不失真）、lastHits = 实际注入数（0.8.6 与用户共识的偏差：原定"injectedTurns
+  命中率不失真）、lastHits = 实际注入数（仅供统计；0.8.6 与用户共识的偏差：原定"injectedTurns
   只计实际注入轮"会让命中率恒 100% 空转，实现改为保分母语义）。
 - **调度优先级（runner）**：内部是任务列表（非 Promise 链），`pickNextTaskIndex` 永远先取
   最早的 live 任务，否则队首 rebuild 任务——重建分块让位于正常对话轮次；重建链一次只挂

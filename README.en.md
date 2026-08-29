@@ -100,8 +100,10 @@ by the old suppression. **Freshness weighting**: recall ranking applies a soft w
 relevance the fresh one wins (slots rotate naturally), while a strongly relevant old
 memory still recalls fine (the floor caps its loss at half a ranking score, so
 long-lived facts never sink); tune via `recall.decayHalfLifeDays`, `0` disables. It
-also registers three model-callable memory tools: `memory_search` /
-`conversation_search` / `memory_read_scene`.
+also registers four model-callable memory tools: `memory_commit` / `memory_search` /
+`conversation_search` / `memory_read_scene`. Tool-selection guidance and search-call limits live
+in those tool descriptions rather than being injected again into messages or the dynamic system
+prompt.
 
 **Cost dashboard**: every distillation LLM call (extract / dedup / L2 / L3) writes its
 token cost to a SQLite detail table keyed by `provider/model` (configurable retention,

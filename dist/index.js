@@ -6,7 +6,7 @@
  * - L1：LLM 抽取原子记忆（情境切分 + 记忆提取）+ 冲突检测去重 + FTS/向量/混合检索；
  * - L2：LLM 把新记忆整合为场景块（Markdown，META 块 + 热度管理 + 场景导航）；
  * - L3：LLM 从变化场景蒸馏 persona.md（chat=用户画像 / work=Team Operating Doctrine）；
- * - 召回：agent/pre-step 检索 L1，agent 作用域上下文注入画像/场景导航/工具指南；
+ * - 召回：agent/pre-step 检索并注入 L1，agent 作用域上下文仅保留画像/场景导航；
  * - 工具：memory_search / conversation_search / memory_read_scene。
  *
  * 存储架构（对齐 MemoryCore 官方双写设计）：
