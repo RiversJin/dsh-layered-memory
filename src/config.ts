@@ -179,7 +179,7 @@ export const memorySchema = Schema.object({
   }),
   recall: Schema.object({
     enabled: Schema.boolean().default(true),
-    maxResults: Schema.number().min(1).max(20).default(5),
+    maxResults: Schema.number().min(1).max(20).default(2),
     // 预算与超时（ADR-0001 / 规格 A 节）：截断是引流——工具路径返回全文
     maxCharsPerMemory: Schema.number().min(0).max(100_000).default(500),
     maxTotalRecallChars: Schema.number().min(0).max(100_000).default(2000),
@@ -187,7 +187,7 @@ export const memorySchema = Schema.object({
     includePersona: Schema.boolean().default(true),
     includeSceneNav: Schema.boolean().default(true),
     strategy: Schema.union(['keyword', 'embedding', 'hybrid']).default('hybrid'),
-    scoreThreshold: Schema.number().min(0).max(1).default(0.3),
+    scoreThreshold: Schema.number().min(0).max(1).default(0.6),
     // 时效衰减（#29）：乘法软加权 + 地板 0.5（老记忆最多损失一半排序分），只轮转
     // 相关度相近候选的名次；0=关（bench 基线可比性可 pin 0）
     decayHalfLifeDays: Schema.number().min(0).max(3650).default(30),

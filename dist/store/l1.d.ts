@@ -7,9 +7,11 @@ export interface L1SearchOptions {
     type?: string;
     /** 按族过滤（undefined = 不过滤，即 auto 档与浏览路径；检索唯一缝的族语义）。 */
     family?: MemoryFamily;
-    /** 分数阈值（仅召回路径传；keyword/embedding 策略生效，FTS 含小语料例外；
-     *  hybrid 按官方语义在 RRF 融合前不过滤）。 */
+    /** 分数阈值：宽路径沿用单路既有语义；strict 路径作为向量余弦门槛。 */
     scoreThreshold?: number;
+    /** 自动召回的严格门槛：FTS 要覆盖足够查询词元，向量要达到真实余弦阈值；
+     *  显式 memory_search 不传，继续保留宽召回。 */
+    strictThreshold?: boolean;
     /** 嵌入查询内层钳制（ms，只缩短不放大；召回路径传入给 FTS 降级留时间）。 */
     embeddingTimeoutMs?: number;
     /** branch 记忆允许的来源会话（当前会话 + 祖先）；global 不受限制。 */
@@ -50,8 +52,8 @@ export declare class L1Store {
     /**
      * 三策略检索（自动召回与 memory_search 工具共用接缝）。
      * embedding 不可用时自动降级 keyword；type 后置过滤；
-     * scoreThreshold 仅对 keyword/embedding 单路策略生效——hybrid 按官方语义
-     * 融合完整列表（融合分已归一化 0~1，可直接用于展示/过滤）。
+     * 默认保持工具路径的宽召回；strictThreshold 仅供自动召回：先按各路真实相关性
+     * 门槛过滤，再做 RRF，不能拿 RRF 的排名分冒充语义相关度。
      */
     search(query: string, limit: number, opts?: L1SearchOptions): Promise<L1Hit[]>;
     /**

@@ -81,12 +81,19 @@ const ZH_STOP_WORDS = new Set([
     '吗', '吧', '呢', '啊', '呀', '哦', '嗯',
 ]);
 /**
+ * FTS 查询使用的有效词元。单独导出给自动召回的严格词面门槛复用，保证
+ * "建查询"和"算覆盖率"不会各用一套停用词口径。
+ */
+export function tokenizeForSearch(raw) {
+    return [...new Set(tokenize(raw).filter((t) => !ZH_STOP_WORDS.has(t)))];
+}
+/**
  * 把自然语言查询构造成 FTS5 MATCH 表达式：token 引号化后 OR 连接，
  * 命中任一 token 即返回，BM25 自然把命中多 token 的文档排前——
  * 长查询与纯 FTS 模式（无向量）下召回率显著优于整句匹配。
  */
 export function buildFtsQuery(raw) {
-    const tokens = [...new Set(tokenize(raw).filter((t) => !ZH_STOP_WORDS.has(t)))];
+    const tokens = tokenizeForSearch(raw);
     if (tokens.length === 0)
         return null;
     const quoted = tokens.map((t) => `"${t.replaceAll('"', '')}"`);

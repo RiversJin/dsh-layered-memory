@@ -265,14 +265,14 @@ the bundle layer appends and causes `duplicate loader entry id` startup failure)
 | `l3.enabled` | `true` | L3 persona distillation |
 | `l3.interval` | `20` | L3 distillation interval (new-memory count) |
 | `recall.enabled` | `true` | Auto recall |
-| `recall.maxResults` | `5` | Max L1 records injected before each new user message |
+| `recall.maxResults` | `2` | Max L1 records injected before each new user message (automatic path is hard-capped at 2) |
 | `recall.maxCharsPerMemory` | `500` | Per-memory character cap for injected recall (overlong lines truncated with a hint to use the memory tools for the full text); `0` disables |
 | `recall.maxTotalRecallChars` | `2000` | Total character cap per injected recall batch (lowest-ranked tail dropped first); `0` disables |
 | `recall.timeoutMs` | `5000` | Overall recall budget (ms): a timed-out recall skips that turn without blocking the chat; `0` disables |
 | `recall.includePersona` | `true` | Inject persona context into the system prompt (`<user-persona>`, stable zone) |
 | `recall.includeSceneNav` | `true` | Inject scene navigation into the system prompt (`<scene-navigation>`, stable zone) |
 | `recall.strategy` | `hybrid` | Retrieval strategy: `keyword` / `embedding` / `hybrid` |
-| `recall.scoreThreshold` | `0.3` | Recall score threshold (below is not injected; applies to keyword/embedding only, not pre-fusion hybrid; tool path unfiltered) |
+| `recall.scoreThreshold` | `0.6` | Vector cosine gate for automatic recall; hybrid filters both routes by real relevance before fusion, while explicit tool search stays broad |
 | `recall.decayHalfLifeDays` | `30` | Freshness-decay half-life for recall ranking (days, 0=off): ranking applies `relevance × max(0.5, 0.5^(days since last update / half-life))` — among similarly relevant candidates the fresh one wins (slots rotate), and an old memory loses at most half its ranking score (floor keeps long-lived facts afloat) |
 | `embedding.enabled` | `false` | Vector retrieval switch; off = pure FTS |
 | `embedding.baseUrl` | empty | OpenAI-compatible /embeddings endpoint (e.g. `https://api.siliconflow.cn/v1`) |
@@ -295,6 +295,8 @@ the bundle layer appends and causes `duplicate loader entry id` startup failure)
 | `tokenCost.retentionDays` | `365` | Retention (days) for distillation cost details (the `token_cost` table); rows older than this are rolled away on write. `0` = keep forever. Also the upper bound of the cost dashboard's "last N days" window |
 | `tools` | `true` | Whether to register model-callable memory tools |
 | `benchControl` | `false` | Register the in-process bench control service (rebuild trigger / session-mode setting / distillation usage snapshot — used by the benchmark's lifecycle track). Off by default — zero surface in production deployments; do not enable casually |
+
+After a successful automatic injection, recall waits for both 10 minutes and 3 new user turns before it can trigger again. `compact`/`clear` resets this cooldown; explicit `memory_search` is unaffected.
 
 ### Distillation fallback chain & slow-TTFT models
 

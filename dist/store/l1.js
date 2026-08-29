@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import { familyForType } from '../types.js';
 import { EmbedHelper, NoopEmbeddingService } from './embedding.js';
 import { appendJsonl, dayKey, ensureDir, readJsonl } from './io.js';
-import { applyDecayWeight, RRF_K, rrfMerge } from './search-utils.js';
+import { applyDecayWeight, RRF_K, rrfMerge, tokenizeForSearch } from './search-utils.js';
 import { isZeroVector } from './sqlite.js';
 const presetBinding = (presetId) => `preset:${presetId}`;
 function isVisibleRecord(record, visibleSessionIds, visiblePresetId) {
@@ -149,8 +149,8 @@ export class L1Store {
     /**
      * 三策略检索（自动召回与 memory_search 工具共用接缝）。
      * embedding 不可用时自动降级 keyword；type 后置过滤；
-     * scoreThreshold 仅对 keyword/embedding 单路策略生效——hybrid 按官方语义
-     * 融合完整列表（融合分已归一化 0~1，可直接用于展示/过滤）。
+     * 默认保持工具路径的宽召回；strictThreshold 仅供自动召回：先按各路真实相关性
+     * 门槛过滤，再做 RRF，不能拿 RRF 的排名分冒充语义相关度。
      */
     async search(query, limit, opts) {
         const caps = this.db.getCapabilities();
@@ -166,26 +166,34 @@ export class L1Store {
             return [];
         if (strategy === 'keyword') {
             const fts = this.db.searchL1Fts(query, candidateK, opts?.family);
-            return this.postProcess(this.applyDecay(applyFtsThreshold(fts, threshold, limit)), opts, limit);
+            const gated = opts?.strictThreshold
+                ? filterStrictFts(fts, query)
+                : applyFtsThreshold(fts, threshold, limit);
+            return this.postProcess(this.applyDecay(gated), opts, limit);
         }
         if (strategy === 'embedding') {
             const vec = await this.helper.query(query, opts?.embeddingTimeoutMs);
             if (!vec) {
                 // embedding 调用失败：降级 FTS，不阻断
                 const fts = this.db.searchL1Fts(query, candidateK, opts?.family);
-                return this.postProcess(this.applyDecay(applyFtsThreshold(fts, threshold, limit)), opts, limit);
+                const gated = opts?.strictThreshold
+                    ? filterStrictFts(fts, query)
+                    : applyFtsThreshold(fts, threshold, limit);
+                return this.postProcess(this.applyDecay(gated), opts, limit);
             }
             const vecHits = this.db.searchL1Vector(vec, candidateK, opts?.family);
             return this.postProcess(this.applyDecay(filterScore(vecHits, threshold)), opts, limit);
         }
-        // hybrid（官方语义）：双路并行 → 完整列表 RRF 融合（融合前不过滤阈值）
-        // → 融合分归一化：rank1 双列表命中 = 1.0，单列表命中 ≤ 0.5，保持 0~1 语义
+        // hybrid：工具路径融合完整列表；自动召回 strict 路径先做真实相关性门控：
+        // FTS 看有效词元覆盖率，向量看余弦相似度。随后 RRF 只负责排序，不充当相关性分。
         const [ftsList, vecRaw] = await Promise.all([
             Promise.resolve(this.db.searchL1Fts(query, candidateK, opts?.family)),
             this.helper.query(query, opts?.embeddingTimeoutMs),
         ]);
         const vecList = vecRaw ? this.db.searchL1Vector(vecRaw, candidateK, opts?.family) : [];
-        const merged = rrfMerge([ftsList, vecList], (h) => h.id);
+        const gatedFts = opts?.strictThreshold ? filterStrictFts(ftsList, query) : ftsList;
+        const gatedVec = opts?.strictThreshold ? filterScore(vecList, threshold) : vecList;
+        const merged = rrfMerge([gatedFts, gatedVec], (h) => h.id);
         return this.postProcess(this.applyDecay(merged.map(({ rrfScore, ...h }) => ({ ...h, score: normalizeRrf(rrfScore) }))), opts, limit);
     }
     /**
@@ -326,4 +334,23 @@ function filterScore(hits, threshold) {
     if (threshold <= 0)
         return hits;
     return hits.filter((h) => h.score >= threshold);
+}
+/**
+ * 自动召回的 FTS 门槛：OR 查询命中一个泛词不够，至少覆盖 30% 的有效查询词元。
+ * 词元口径与 buildFtsQuery 完全一致；短查询至少命中 1 个，避免纯 FTS 降级时失忆。
+ */
+function filterStrictFts(hits, query) {
+    const queryTokens = tokenizeForSearch(query);
+    if (queryTokens.length === 0)
+        return [];
+    const required = Math.max(1, Math.ceil(queryTokens.length * 0.3));
+    return hits.filter((hit) => {
+        const contentTokens = new Set(tokenizeForSearch(hit.content));
+        let overlap = 0;
+        for (const token of queryTokens) {
+            if (contentTokens.has(token) && ++overlap >= required)
+                return true;
+        }
+        return false;
+    });
 }

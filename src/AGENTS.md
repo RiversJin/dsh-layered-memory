@@ -67,8 +67,10 @@
   （turn/start + user 消息）裁掉（2026-08-16 真实事故，长回复轮次丢 user 消息）。裁剪铁律
   （`trimBuffer`）：进行中轮次的事件绝不裁。**L0 在 capture 的 turn/end 即时落盘**（独立串行链，
   `l0Queue`），runner 不再写 L0——否则会被蒸馏队列里的慢 LLM 调用阻塞，进程退出时丢排队消息。
-- **检索唯一缝**：`L1Store.search()`（现 async，接受 `{type?, family?, scoreThreshold?, embeddingTimeoutMs?}`）是唯一检索入口；
+- **检索唯一缝**：`L1Store.search()`（现 async，接受 `{type?, family?, scoreThreshold?, strictThreshold?, embeddingTimeoutMs?}`）是唯一检索入口；
   换检索实现只改 `src/store/sqlite.ts` + `l1.ts`/`l0.ts`，不要在别处另开检索路径。
+  自动召回传 `strictThreshold:true`：FTS 至少覆盖 30% 有效查询词元，向量必须达到真实余弦阈值，
+  再进入 RRF；显式 `memory_search` 不传，保留宽召回。RRF 归一化分只表示排名融合，禁止当相关性门槛。
   family 过滤三路都有（FTS SQL `AND family=?` / vec 过度召回×3 + 回查过滤 / hybrid 双路各自过滤后 RRF）。
   **时效衰减加权（0.8.6，#29）**：`applyDecayWeight`（search-utils）在 `search()` 三路
   阈值后、截断前挂载——`score × max(0.5, 0.5^(Δ天/半衰期))`（Δ 按 updated_at，缺失按最老→地板），
@@ -131,6 +133,8 @@
   注入只在有新用户来源消息的步骤发生（轮首 + steering 插话），排在用户消息**之前**，
   pre-step 必须 prepend 注册且先 `await next()` 再改写；召回预算（单条/整轮）与总超时
   （recall.timeoutMs）在注入路径强制生效，超时跳过本轮绝不阻塞对话。
+  成功注入后还要同时满足 10 分钟与 3 个新用户轮次才再次自动检索；`compact`/`clear`
+  清掉冷却（内容已离开窗口），显式工具搜索不经过此门槛。
 - **召回去重（0.8.6）**：同会话已注入过的记录不再重复注入（`recall-dedupe.ts`：
   内存 Set 权威 + 写穿 `recall-dedupe.json`，LRU 200 会话 / 单会话 512 id / 90 天过期，
   I/O 失败降级内存态）。纯过滤——剩几条注几条，全量压制是正确状态；粒度 = 记录 id

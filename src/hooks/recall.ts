@@ -68,6 +68,36 @@ const storedEstimateCache = new Map<string, number | null>();
 const RECALL_QUERY_TAIL_MESSAGES = 8;
 /** 召回查询总字符上限（保留末尾——最新语境权重最高）。 */
 const RECALL_QUERY_MAX_CHARS = 2_000;
+/** 自动注入宁缺毋滥；更多结果由模型显式 memory_search 获取。 */
+export const AUTO_RECALL_MAX_RESULTS = 2;
+/** 成功注入后的自动召回冷却：时间与轮次两个条件都满足才重新放行。 */
+export const AUTO_RECALL_COOLDOWN_MS = 10 * 60_000;
+export const AUTO_RECALL_COOLDOWN_TURNS = 3;
+const AUTO_RECALL_COOLDOWN_SESSION_CAP = 200;
+
+export interface RecallCooldownState {
+  lastInjectedAt: number;
+  turnsSinceInjection: number;
+}
+
+/** 每个新用户步推进一次；无既往注入立即放行，否则时间与轮次缺一不可。 */
+export function advanceRecallCooldown(
+  state: RecallCooldownState | undefined,
+  now: number,
+  minIntervalMs = AUTO_RECALL_COOLDOWN_MS,
+  minTurns = AUTO_RECALL_COOLDOWN_TURNS,
+): boolean {
+  if (!state) return true;
+  state.turnsSinceInjection++;
+  return now - state.lastInjectedAt >= minIntervalMs && state.turnsSinceInjection >= minTurns;
+}
+
+/** registerRecall 的时钟/阈值测试缝；生产调用不传，固定使用上面的保守默认值。 */
+export interface RecallCadenceOptions {
+  now?: () => number;
+  minIntervalMs?: number;
+  minTurns?: number;
+}
 
 /**
  * 从会话消息构建召回查询（纯函数）：末尾 N 条 + 总长截断，空输入返回空串。
@@ -82,6 +112,17 @@ export function buildRecallQuery(
   let text = tail.map((m) => blocksToText(m.content as never)).join(' ').trim();
   if (text.length > maxChars) text = text.slice(-maxChars);
   return text;
+}
+
+/**
+ * 低信息输入不值得触发跨会话检索。这里只拦极短输入与纯确认/推进语，
+ * 不尝试做主题分类；真正的相关性仍由 L1 strict 检索门槛判断。
+ */
+export function isLowInformationRecallQuery(query: string): boolean {
+  const compact = query.normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+  if ([...compact.matchAll(/[\p{L}\p{N}]/gu)].length < 3) return true;
+  if (/^(?:好的?|好吧|行吧?|可以|没问题|开始吧|继续|continue|嗯+|哦+|呜+|哈+|谢谢|收到|算了|就这样吧?|知道了|明白了|对|是的|不是|再试试|试试|看看)$/.test(compact)) return true;
+  return /^(?:好的?|好吧|行吧?|可以|没问题|收到|知道了|明白了)(?:开始吧|继续|continue|再试试|试试|看看)$/.test(compact);
 }
 
 /** 单会话召回统计（悬浮卡信息区数据源；每轮 O(1) 记账，agent/disposed 清理）。
@@ -134,6 +175,7 @@ export function registerRecall(
   modes: SessionModeStore,
   dataDir: string,
   lineage?: SessionLineageStore,
+  cadence: RecallCadenceOptions = {},
 ): RecallHooks {
   /** 召回去重存储（同会话已注入的记忆不再重复注入；写穿持久化，重启不丢）。 */
   const dedupe = new RecallDedupeStore(dataDir, logger);
@@ -141,6 +183,20 @@ export function registerRecall(
   const occupancyStore = new OccupancyStore(dataDir, logger);
   /** 每 agent 召回统计（悬浮卡信息区与诊断使用）。 */
   const recallStats = new Map<string, RecallSessionStats>();
+  /** 成功注入后的进程内冷却；保留 agent dispose/恢复语义，LRU 上限防会话常驻增长。 */
+  const cooldowns = new Map<string, RecallCooldownState>();
+  const cadenceNow = cadence.now ?? Date.now;
+  const cooldownMs = cadence.minIntervalMs ?? AUTO_RECALL_COOLDOWN_MS;
+  const cooldownTurns = cadence.minTurns ?? AUTO_RECALL_COOLDOWN_TURNS;
+  const markCooldown = (id: string): void => {
+    cooldowns.delete(id);
+    cooldowns.set(id, { lastInjectedAt: cadenceNow(), turnsSinceInjection: 0 });
+    while (cooldowns.size > AUTO_RECALL_COOLDOWN_SESSION_CAP) {
+      const oldest = cooldowns.keys().next().value as string | undefined;
+      if (!oldest) break;
+      cooldowns.delete(oldest);
+    }
+  };
   const statFor = (id: string): RecallSessionStats => {
     let s = recallStats.get(id);
     if (!s) {
@@ -202,6 +258,7 @@ export function registerRecall(
   ctx.on('agent/session-start', (payload) => {
     if (payload.source === 'compact' || payload.source === 'clear') {
       dedupe.reset(payload.agent.id);
+      cooldowns.delete(payload.agent.id);
       const led = ledgerFor(payload.agent.id);
       resetForCompaction(led);
       occupancyStore.save(payload.agent.id, led); // stock 归零 ⇒ 流水条目删除
@@ -227,9 +284,26 @@ export function registerRecall(
             (m) => (m as { source?: { kind?: string } }).source?.kind === 'user',
           );
           if (!hasNewUserMessage) return decision;
-          const query = buildRecallQuery(payload.messages as Array<{ content: unknown }>);
+          const cooldown = cooldowns.get(payload.agent.id);
+          if (!advanceRecallCooldown(cooldown, cadenceNow(), cooldownMs, cooldownTurns)) {
+            const skipped = statFor(payload.agent.id);
+            skipped.lastHits = 0;
+            skipped.updatedAt = cadenceNow();
+            logger.debug?.(
+              `[memory] 自动召回冷却中（agent=${payload.agent.id}，` +
+              `${cooldown?.turnsSinceInjection ?? 0}/${cooldownTurns} 轮，` +
+              `${Math.max(0, cadenceNow() - (cooldown?.lastInjectedAt ?? 0))}/${cooldownMs}ms）`,
+            );
+            return decision;
+          }
+          // 只拿本步新用户消息做查询：历史回复与旧 recall 已在当前上下文里，重复拼入会
+          // 造成检索自反馈，并让一个旧主题在后续每轮持续触发注入。
+          const newUserMessages = decision.messages.filter(
+            (m) => (m as { source?: { kind?: string } }).source?.kind === 'user',
+          );
+          const query = buildRecallQuery(newUserMessages as Array<{ content: unknown }>);
           // 空查询是退化轮（无用户文本），重置命中信号但不计入统计
-          if (!query) {
+          if (!query || isLowInformationRecallQuery(query)) {
             const degenerate = statFor(payload.agent.id);
             degenerate.lastHits = 0;
             return decision;
@@ -240,8 +314,9 @@ export function registerRecall(
           st.updatedAt = Date.now();
           const searchStart = Date.now();
           const hits = await raceRecallTimeout(
-            stores.l1.search(query, cfg.recall.maxResults, {
+            stores.l1.search(query, Math.min(cfg.recall.maxResults, AUTO_RECALL_MAX_RESULTS), {
               scoreThreshold: cfg.recall.scoreThreshold,
+              strictThreshold: true,
               family: mode === 'auto' ? undefined : mode,
               // 嵌入内层钳制：给 FTS 降级留出总预算内的时间（远程限 HTTP fetch；本地经 worker 代理 race 放弃）
               embeddingTimeoutMs: RECALL_EMBED_CAP_MS,
@@ -260,7 +335,7 @@ export function registerRecall(
           // 召回去重：同会话已注入过的记录不再重复注入（模型上下文已持有，省 token）。
           // 纯过滤——剩几条注几条，全量压制（0 条新鲜命中）是正确状态而非未命中。
           const seen = dedupe.seen(payload.agent.id);
-          const fresh = hits.filter((h) => !seen.has(h.id));
+          const fresh = hits.filter((h) => !seen.has(h.id)).slice(0, AUTO_RECALL_MAX_RESULTS);
           const suppressed = hits.length - fresh.length;
           st.suppressedRecalls += suppressed;
           if (suppressed > 0) {
@@ -304,6 +379,7 @@ export function registerRecall(
           const led = ledgerFor(payload.agent.id);
           recordRecallInjection(led, text.length);
           occupancyStore.save(payload.agent.id, led);
+          markCooldown(payload.agent.id);
           // 注入消息排在用户新消息之前（原版 prepend 语义：先线索后问题）
           return { kind: 'enter', messages: [injection, ...decision.messages] };
         } catch (err) {

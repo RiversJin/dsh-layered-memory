@@ -273,15 +273,15 @@ ONNX 量化 **CPU 推理**——无需 API Key，数据不出本机）。本地�
 | `l3.enabled` | `true` | L3 画像蒸馏 |
 | `l3.interval` | `20` | L3 蒸馏间隔（新记忆条数） |
 | `recall.enabled` | `true` | 自动召回 |
-| `recall.maxResults` | `5` | 每条新用户消息前注入的 L1 条数上限 |
+| `recall.maxResults` | `2` | 每条新用户消息前注入的 L1 条数上限（自动路径硬上限为 2） |
 | `recall.maxCharsPerMemory` | `500` | 单条注入记忆的字符上限（超限截断并提示用记忆工具查全文）；`0` 不限 |
 | `recall.maxTotalRecallChars` | `2000` | 整轮注入总字符上限（超限按相关性丢尾部）；`0` 不限 |
 | `recall.timeoutMs` | `5000` | 召回总预算（ms）：超时跳过本轮注入、不阻塞对话；`0` 不限时 |
 | `recall.includePersona` | `true` | 系统提示注入画像上下文（`<user-persona>`，稳定区） |
 | `recall.includeSceneNav` | `true` | 系统提示注入场景导航（`<scene-navigation>`，稳定区） |
 | `recall.strategy` | `hybrid` | 检索策略：`keyword` / `embedding` / `hybrid` |
-| `recall.scoreThreshold` | `0.3` | 召回分数阈值（低于不注入；仅 keyword/embedding 策略生效，hybrid 融合前不过滤；工具路径不过滤） |
-| `recall.decayHalfLifeDays` | `30` | 召回时效衰减半衰期（天，0=关）：排序按 `相关度 × max(0.5, 0.5^(距更新天数/半衰期))` 软加权——相关度相近的候选间新鲜记忆优先（名额轮转），老记忆最多损失一半排序分（地板兜底，长期事实不沉底） |
+| `recall.scoreThreshold` | `0.6` | 自动召回的向量余弦门槛；hybrid 会先以真实相关性过滤两路再融合，显式工具搜索保持宽召回 |
+| `recall.decayHalfLifeDays` | `30` | 召回时效衰减半衰期（天，0=关）：排序按 `相关度 × max(0.5, 0.5^(距更新天数/半衰期))` 软加权——相关度相近候选间新鲜记忆优先（名额轮转），老记忆最多损失一半排序分（地板兜底，长期事实不沉底） |
 | `embedding.enabled` | `false` | 向量检索开关；关闭即纯 FTS 运行 |
 | `embedding.baseUrl` | 空 | OpenAI 兼容 /embeddings 地址（如 `https://api.siliconflow.cn/v1`） |
 | `embedding.apiKey` | 空 | API Key |
@@ -303,6 +303,8 @@ ONNX 量化 **CPU 推理**——无需 API Key，数据不出本机）。本地�
 | `tokenCost.retentionDays` | `365` | 蒸馏成本明细（token_cost 表）保留天数，写入时滚动清理更早行；`0` = 永久保留。成本看板「近 N 天」窗口上限同此值 |
 | `tools` | `true` | 是否注册模型可调用的记忆工具 |
 | `benchControl` | `false` | 注册 bench 控制服务（进程内 rebuild 触发/会话档位设置/蒸馏用量快照，供基准 lifecycle 赛道）。默认关——生产部署零表面积，勿随意开启 |
+
+自动召回成功注入后，会同时等待至少 10 分钟和 3 个新的用户轮次才再次触发；`compact`/`clear` 会重置冷却。显式 `memory_search` 不受此限制。
 
 ### 蒸馏回退链与慢 TTFT 模型
 

@@ -25,6 +25,23 @@ import type { SessionModeStore } from '../store/session-modes.js';
 import type { SessionLineageStore } from '../store/session-lineage.js';
 import type { MemoryLogger } from '../types.js';
 import { type OccupancyLedger } from '../util/context-occupancy.js';
+/** 自动注入宁缺毋滥；更多结果由模型显式 memory_search 获取。 */
+export declare const AUTO_RECALL_MAX_RESULTS = 2;
+/** 成功注入后的自动召回冷却：时间与轮次两个条件都满足才重新放行。 */
+export declare const AUTO_RECALL_COOLDOWN_MS: number;
+export declare const AUTO_RECALL_COOLDOWN_TURNS = 3;
+export interface RecallCooldownState {
+    lastInjectedAt: number;
+    turnsSinceInjection: number;
+}
+/** 每个新用户步推进一次；无既往注入立即放行，否则时间与轮次缺一不可。 */
+export declare function advanceRecallCooldown(state: RecallCooldownState | undefined, now: number, minIntervalMs?: number, minTurns?: number): boolean;
+/** registerRecall 的时钟/阈值测试缝；生产调用不传，固定使用上面的保守默认值。 */
+export interface RecallCadenceOptions {
+    now?: () => number;
+    minIntervalMs?: number;
+    minTurns?: number;
+}
 /**
  * 从会话消息构建召回查询（纯函数）：末尾 N 条 + 总长截断，空输入返回空串。
  * 全史拼接会让 MATCH 表达式随会话长度线性膨胀（整会话累计二次方成本）。
@@ -32,6 +49,11 @@ import { type OccupancyLedger } from '../util/context-occupancy.js';
 export declare function buildRecallQuery(messages: Array<{
     content: unknown;
 }>, tailMessages?: number, maxChars?: number): string;
+/**
+ * 低信息输入不值得触发跨会话检索。这里只拦极短输入与纯确认/推进语，
+ * 不尝试做主题分类；真正的相关性仍由 L1 strict 检索门槛判断。
+ */
+export declare function isLowInformationRecallQuery(query: string): boolean;
 /** 单会话召回统计（悬浮卡信息区数据源；每轮 O(1) 记账，agent/disposed 清理）。
  *  口径声明：这是"注入统计"而非 bench 的离线 recall@k——运行时没有 ground truth，
  *  命中率 = hitTurns / injectedTurns。去重语义（0.8.6）：全量压制轮计入 hitTurns
@@ -61,4 +83,4 @@ export declare function registerRecall(ctx: Context, cfg: MemoryConfig, stores: 
     l1: L1Store;
     scenes: Record<'chat' | 'work', SceneStore>;
     persona: Record<'chat' | 'work', PersonaStore>;
-}, logger: MemoryLogger, live: LiveSettingsHandle, modes: SessionModeStore, dataDir: string, lineage?: SessionLineageStore): RecallHooks;
+}, logger: MemoryLogger, live: LiveSettingsHandle, modes: SessionModeStore, dataDir: string, lineage?: SessionLineageStore, cadence?: RecallCadenceOptions): RecallHooks;

@@ -62,7 +62,17 @@ import { familyForType, normExtractedFamily, resolveRecordFamily } from './types
 import { CaptureBuffers, isCaptureRelevant, registerCapture, trimBuffer } from './hooks/capture.js';
 import { RecallDedupeStore, RECALL_DEDUPE_IDS_CAP, RECALL_DEDUPE_SESSION_CAP } from './store/recall-dedupe.js';
 import { OccupancyStore, OCCUPANCY_SESSION_CAP } from './store/occupancy.js';
-import { buildRecallQuery, registerRecall, type RecallSessionStats } from './hooks/recall.js';
+import {
+  advanceRecallCooldown,
+  AUTO_RECALL_COOLDOWN_MS,
+  AUTO_RECALL_COOLDOWN_TURNS,
+  AUTO_RECALL_MAX_RESULTS,
+  buildRecallQuery,
+  isLowInformationRecallQuery,
+  registerRecall,
+  type RecallCooldownState,
+  type RecallSessionStats,
+} from './hooks/recall.js';
 import { sanitizeText, shouldCaptureL0, stripCodeBlocks } from './util/sanitize.js';
 import { errDetail, SIZE_CHECK_INTERVAL, withFileLog } from './util/filelog.js';
 import { parseJson } from './llm.js';
@@ -252,6 +262,9 @@ async function main(): Promise<void> {
     assert(strict.length === 1, '小语料例外：结果数 ≤ maxResults 时保留低分命中');
     const strictMany = await l1.search('记忆 咖啡 手冲 用户 团队 分层', 1, { scoreThreshold: 0.99 });
     assert(strictMany.length === 0, '结果数超过 maxResults 时阈值生效（无例外）');
+    const broadGeneric = await l1.search('这个用户想知道指南做什么用', 5);
+    const strictGeneric = await l1.search('这个用户想知道指南做什么用', 5, { scoreThreshold: 0.6, strictThreshold: true });
+    assert(broadGeneric.length > 0 && strictGeneric.length === 0, '自动 strict FTS 拒绝只命中少量泛词的候选，宽搜索保持原样');
 
     // 浏览接口（UI 用）：按更新时间倒序 + 类型/场景过滤 + 分页
     const browseAll = l1.list({ limit: 10, offset: 0 });
@@ -376,6 +389,9 @@ async function main(): Promise<void> {
     const vh = await l1v.search('咖啡 手冲', 5);
     assert(vh.length >= 1 && vh[0].id === 'c1', `hybrid 检索命中 (${vh.map((h) => h.id).join(',')})`);
     assert(vh[0].score >= 0.5 && vh[0].score <= 1, `hybrid 融合分归一化 0~1 (${vh[0].score.toFixed(3)})`);
+    const broadVector = await l1v.search('完全无关召回探针', 5);
+    const strictVector = await l1v.search('完全无关召回探针', 5, { scoreThreshold: 0.99, strictThreshold: true });
+    assert(broadVector.length > 0 && strictVector.length === 0, '自动 strict hybrid 过滤弱向量近邻，显式宽搜索仍可返回候选');
 
     const l1e = new L1Store(tmp2, db2, embed, 'embedding');
     const eh = await l1e.search('分层 架构', 5, { scoreThreshold: 0.3 });
@@ -1605,6 +1621,17 @@ async function main(): Promise<void> {
     assert(q2.length <= 2000 && !q2.includes('头部标记') && q2.endsWith('xxx'), `字符上限截断且保留末尾（len=${q2.length}）`);
     assert(buildRecallQuery([]) === '', '空输入返回空查询');
     assert(buildRecallQuery([{ content: [] }, { content: [{ type: 'text', text: '  ' }] }]) === '', '无有效文本返回空查询');
+    assert(isLowInformationRecallQuery('呜……') && isLowInformationRecallQuery('好的，开始吧。'), '低信息短句与纯推进语不触发自动召回');
+    assert(!isLowInformationRecallQuery('栖月这个名字是怎么来的？'), '有明确语义的当前问题保留自动召回');
+    const cadenceState: RecallCooldownState = { lastInjectedAt: 1_000, turnsSinceInjection: 0 };
+    assert(!advanceRecallCooldown(cadenceState, 1_000 + AUTO_RECALL_COOLDOWN_MS), '冷却：时间到但第 1 个新用户轮仍拦截');
+    assert(!advanceRecallCooldown(cadenceState, 1_000 + AUTO_RECALL_COOLDOWN_MS), '冷却：时间到但第 2 个新用户轮仍拦截');
+    assert(
+      advanceRecallCooldown(cadenceState, 1_000 + AUTO_RECALL_COOLDOWN_MS)
+      && cadenceState.turnsSinceInjection === AUTO_RECALL_COOLDOWN_TURNS,
+      '冷却：10 分钟与 3 个新用户轮同时满足后放行',
+    );
+    assert(advanceRecallCooldown(undefined, 0), '冷却：从未成功注入的会话立即放行');
 
     // 15b. pre-step 消息侧注入（ADR-0001）：合成消息排在用户消息之前、带插件来源与 recall 形态
     const tmpT5 = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-mem-recall-'));
@@ -1672,13 +1699,15 @@ async function main(): Promise<void> {
         sessions: fakeSessionSvc,
       } as never;
       let searchCalls = 0;
+      let lastSearch: { query: string; limit: number; strictThreshold?: boolean; scoreThreshold?: number } | undefined;
       let hitContent = '命中记忆内容';
       let hitId = 'h1'; // 可换新 id：模拟新记忆/更新后的记录（去重语义下旧 id 已注入会被压制）
       let personaText = '';
       const storesT5 = {
         l1: {
-          search: async () => {
+          search: async (query: string, limit: number, opts?: { strictThreshold?: boolean; scoreThreshold?: number }) => {
             searchCalls++;
+            lastSearch = { query, limit, strictThreshold: opts?.strictThreshold, scoreThreshold: opts?.scoreThreshold };
             return [{ id: hitId, content: hitContent, type: 'persona', priority: 70, scene_name: '闲聊', score: 0.9, family: 'chat' }];
           },
         },
@@ -1717,6 +1746,8 @@ async function main(): Promise<void> {
         liveT5 as never,
         modesT5,
         tmpT5,
+        undefined,
+        { minIntervalMs: 0, minTurns: 0 },
       );
       assert(contextText['memory:recall'] === undefined, '动态召回槽（memory:recall）已从系统提示撤除');
       assert(typeof contextText['memory:profile'] === 'function', '系统提示稳定区上下文已注册');
@@ -1734,6 +1765,11 @@ async function main(): Promise<void> {
         },
       );
       assert(nexted === 1 && searchCalls === 1, '先 next() 再改写，有查询时执行检索');
+      assert(
+        lastSearch?.query === '咖啡 手冲 偏好' && lastSearch.limit === AUTO_RECALL_MAX_RESULTS
+        && lastSearch.strictThreshold === true && lastSearch.scoreThreshold === 0.3,
+        '自动召回只查询本步新用户消息，启用 strict 门槛并限制最多 2 条',
+      );
       assert(d1.kind === 'enter' && d1.messages.length === 2, `注入消息插入（${d1.kind === 'enter' ? d1.messages.length : 'reject'}）`);
       const inj = d1.kind === 'enter' ? (d1.messages[0] as { source?: Record<string, string>; content?: Array<{ text?: string }> }) : undefined;
       assert(
@@ -1755,6 +1791,14 @@ async function main(): Promise<void> {
       );
       assert(d2.kind === 'enter' && d2.messages.length === 1 && d2.messages[0] === toolMsg, '纯工具步透传（不注入）');
       assert(searchCalls === 1, '工具步不发起检索');
+
+      // ②b 低信息用户输入 → 透传且不检索（避免“呜/继续”轮播新记忆）
+      const lowInfoMsg = { ...userMsg, id: 'u-low', content: [{ type: 'text', text: '呜……' }] };
+      const d2b = await preStep!(
+        { agent: { id: 'agent-t5' }, messages: [userMsg, lowInfoMsg] as never, signal: { aborted: false } },
+        () => Promise.resolve(enter([lowInfoMsg])),
+      );
+      assert(d2b.kind === 'enter' && d2b.messages.length === 1 && searchCalls === 1, '低信息输入不发起自动召回');
 
       // ③ reject 决策透传
       const d3 = await preStep!(
@@ -1967,6 +2011,8 @@ async function main(): Promise<void> {
         liveT5 as never,
         modesT5,
         tmpT5,
+        undefined,
+        { minIntervalMs: 0, minTurns: 0 },
       );
       await waitFor(() => (contextText2['memory:profile']() ?? '').includes('用户画像内容'), 'profileCache 首刷可见');
       const profileNoTools = contextText2['memory:profile']() ?? '';
@@ -3831,6 +3877,8 @@ async function main(): Promise<void> {
         liveH as never,
         modesH,
         tmpH,
+        undefined,
+        { minIntervalMs: 0, minTurns: 0 },
       );
       const userMsgH = { id: 'u1', role: 'user', content: [{ type: 'text', text: '咖啡 手冲 偏好' }], source: { kind: 'user' }, timestamp: 1 };
       const stepH = () =>
