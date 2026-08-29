@@ -7,13 +7,15 @@ export type MemoryFamily = 'chat' | 'work';
 export type MemoryMode = 'auto' | 'chat' | 'work' | 'off';
 /** 蒸馏可用的档位（off 在捕获侧被拦截，永远到不了管线）。 */
 export type ExtractMode = 'auto' | 'chat' | 'work';
-/** 记忆可见域：global 对所有分支可见；branch 仅对来源分支及其后代可见。 */
-export type MemoryScope = 'global' | 'branch';
+/** 记忆可见域：global 对所有会话可见；preset 仅同 agent preset；branch 仅来源分支及后代。 */
+export type MemoryScope = 'global' | 'preset' | 'branch';
 /** DSH fork 谱系的持久化投影。 */
 export interface SessionLineage {
     sessionId: string;
     rootSessionId: string;
     parentSessionId?: string;
+    /** 会话创建时使用的 agent preset；fork 缺字段时继承父会话。 */
+    agentPreset?: string;
     seedLength?: number;
     createdAt: number;
 }
@@ -79,7 +81,7 @@ export interface MemoryRecord {
     source_message_ids?: string[];
     /** 类型附加信息（episodic 的活动起止时间等）。 */
     metadata?: Record<string, unknown>;
-    /** 来源会话（缺省 default；跨会话记忆共享）。 */
+    /** 绑定标识：branch 为来源会话；preset 为 `preset:<id>`；global 仅作来源审计。 */
     sessionId?: string;
     /** 可见域；旧数据缺省视为 global，保持升级前的跨会话可见语义。 */
     scope?: MemoryScope;

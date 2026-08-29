@@ -158,6 +158,7 @@ export function registerRecall(ctx, cfg, stores, logger, live, modes, dataDir, l
                     // 嵌入内层钳制：给 FTS 降级留出总预算内的时间（远程限 HTTP fetch；本地经 worker 代理 race 放弃）
                     embeddingTimeoutMs: RECALL_EMBED_CAP_MS,
                     visibleSessionIds: lineage?.ancestors(payload.agent.id) ?? [payload.agent.id],
+                    visiblePresetId: lineage?.presetOf(payload.agent.id),
                 }), cfg.recall.timeoutMs);
                 st.updatedAt = Date.now();
                 if (hits === undefined) {

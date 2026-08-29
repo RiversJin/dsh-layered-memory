@@ -1504,7 +1504,7 @@ function rowToRecord(row) {
         metadata,
         family: normFamily(row.family, row.type),
         sessionId: row.session_id ?? 'default',
-        scope: row.scope === 'branch' ? 'branch' : 'global',
+        scope: row.scope === 'branch' || row.scope === 'preset' ? row.scope : 'global',
         source_message_ids: sourceIds,
     };
 }

@@ -13,6 +13,15 @@ import { EmbedHelper, NoopEmbeddingService } from './embedding.js';
 import { appendJsonl, dayKey, ensureDir, readJsonl } from './io.js';
 import { applyDecayWeight, RRF_K, rrfMerge } from './search-utils.js';
 import { isZeroVector } from './sqlite.js';
+const presetBinding = (presetId) => `preset:${presetId}`;
+function isVisibleRecord(record, visibleSessionIds, visiblePresetId) {
+    const scope = record.scope ?? 'global';
+    if (scope === 'global')
+        return true;
+    if (scope === 'preset')
+        return !!visiblePresetId && record.sessionId === presetBinding(visiblePresetId);
+    return !!visibleSessionIds?.includes(record.sessionId ?? 'default');
+}
 /** 官方过度召回倍数：候选池 = limit × 3（官方 tool 路径同款）。 */
 const CANDIDATE_MULTIPLIER = 3;
 export class L1Store {
@@ -149,7 +158,7 @@ export class L1Store {
         let strategy = this.strategy;
         if (strategy !== 'keyword' && !canVec)
             strategy = caps.ftsSearch ? 'keyword' : 'none';
-        const candidateK = opts?.visibleSessionIds
+        const candidateK = opts?.visibleSessionIds || opts?.visiblePresetId
             ? Math.max(this.db.countL1(), limit)
             : limit * CANDIDATE_MULTIPLIER;
         const threshold = opts?.scoreThreshold ?? 0;
@@ -206,17 +215,14 @@ export class L1Store {
      * 去重候选召回（官方 3 级）：空库跳过 → 向量优先 → FTS 兜底。
      * 传入 family 时只在同族记录里召回（去重永不跨族）。
      */
-    async searchCandidates(query, limit, family, visibleSessionIds) {
+    async searchCandidates(query, limit, family, visibleSessionIds, visiblePresetId) {
         if (this.db.countL1() === 0)
             return [];
-        const candidateK = visibleSessionIds ? this.db.countL1() : limit;
+        const candidateK = visibleSessionIds || visiblePresetId ? this.db.countL1() : limit;
         const filter = (records) => {
-            if (!visibleSessionIds)
+            if (!visibleSessionIds && !visiblePresetId)
                 return records.slice(0, limit);
-            const visible = new Set(visibleSessionIds);
-            return records
-                .filter((r) => (r.scope ?? 'global') === 'global' || visible.has(r.sessionId ?? 'default'))
-                .slice(0, limit);
+            return records.filter((r) => isVisibleRecord(r, visibleSessionIds, visiblePresetId)).slice(0, limit);
         };
         const caps = this.db.getCapabilities();
         if (caps.vectorSearch && this.helper.vectorReady()) {
@@ -232,7 +238,7 @@ export class L1Store {
                 this.logger?.warn(`[memory] 向量候选召回失败，降级 FTS: ${err instanceof Error ? err.message : String(err)}`);
             }
         }
-        const fts = this.db.searchL1Fts(query, visibleSessionIds ? candidateK : limit * 2, family);
+        const fts = this.db.searchL1Fts(query, visibleSessionIds || visiblePresetId ? candidateK : limit * 2, family);
         return filter(this.db.getL1ByIds(fts.map((h) => h.id)));
     }
     /**
@@ -293,12 +299,11 @@ export class L1Store {
     }
     postProcess(hits, opts, limit) {
         let filtered = opts?.type ? hits.filter((h) => h.type === opts.type) : hits;
-        if (opts?.visibleSessionIds) {
-            const visible = new Set(opts.visibleSessionIds);
+        if (opts?.visibleSessionIds || opts?.visiblePresetId) {
             const records = new Map(this.db.getL1ByIds(filtered.map((h) => h.id)).map((r) => [r.id, r]));
             filtered = filtered.filter((h) => {
                 const r = records.get(h.id);
-                return !!r && ((r.scope ?? 'global') === 'global' || visible.has(r.sessionId ?? 'default'));
+                return !!r && isVisibleRecord(r, opts.visibleSessionIds, opts.visiblePresetId);
             });
         }
         return filtered.slice(0, limit);

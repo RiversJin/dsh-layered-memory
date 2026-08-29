@@ -46,7 +46,8 @@
     `pending.ts`（未蒸馏缓冲持久化 pending.json：条目带 sessionId、随桶存渐进阈值状态）+
     `recall-dedupe.ts`（召回去重：内存 Set 权威 + 写穿持久化）+
     `bm25.ts`（仅 L2 场景摘要选上下文用）+ `io.ts`（原子写等文件原语）。
-- `tools/index.ts` — 模型工具：memory_search / conversation_search / memory_read_scene
+- `tools/index.ts` — 模型工具：memory_commit / memory_search / conversation_search / memory_read_scene；
+  L1 可见域为 global / preset / branch，preset 绑定 `preset:<agentPreset>`。
   （execute 的 `exec.agent.id === sessionId` 用于按会话档位过滤）。
 - `stats.ts` — 通用 RPC 端点 `dsh-memory/*`（authority=loopback），供 client 状态页与输入栏控件拉数据。
 - `llm.ts` / `config.ts`（Schemastery schema + MemoryConfig）/ `types.ts` / `util/`。
@@ -147,6 +148,10 @@
   持有桶对象活引用）；统一 auto 档、按会话分块（会话按首条时间排序）；收尾强制 L2（各族
   残余记录）+ L3（checkpoint 重置后 hasPersona=false → 冷启动触发，无场景的族跳过）。
   重建期间新捕获的 L0 走正常轮次蒸馏（快照从 DB 读，事务一致，天然不重不漏）。
+- **L1 可见域**：`global` 对所有会话可见；`preset` 仅同 `agentPreset` 可见（绑定 id
+  `preset:<id>`）；`branch` 仅来源会话及后代可见。fork 的 lineage 在 header 缺 preset 时
+  继承父会话。自动召回、memory_search、去重与 replaces 校验必须走同一可见性口径，
+  不得把 persona 专属记忆退化成 Web 全局。
 - L2 场景块：LLM 的 delete 操作（输出 `[DELETED]`）由工程侧**删除文件**（硬删除）；
   META 块存热度/摘要；persona-*.md 读取时剥离 Scene Navigation 段。
 - **日志**：`withFileLog`（index.ts 装配）把 info+ 镜像到数据目录 `memory.log`（2MB 轮转），

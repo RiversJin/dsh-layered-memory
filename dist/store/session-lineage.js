@@ -29,6 +29,7 @@ export class SessionLineageStore {
                 sessionId: sid,
                 rootSessionId: typeof raw.rootSessionId === 'string' ? raw.rootSessionId : sid,
                 parentSessionId: parent,
+                agentPreset: typeof raw.agentPreset === 'string' ? raw.agentPreset : undefined,
                 seedLength: Number.isSafeInteger(raw.seedLength) ? raw.seedLength : undefined,
                 createdAt: Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),
             });
@@ -39,10 +40,12 @@ export class SessionLineageStore {
         const sid = String(session.id);
         const parent = session.header.parentSession ? String(session.header.parentSession) : undefined;
         const root = parent ? (this.entries.get(parent)?.rootSessionId ?? parent) : sid;
+        const agentPreset = session.header.agentPreset ?? (parent ? this.entries.get(parent)?.agentPreset : undefined);
         const next = {
             sessionId: sid,
             rootSessionId: root,
             parentSessionId: parent,
+            agentPreset,
             seedLength: session.header.seedLength,
             createdAt: session.header.createdAt,
         };
@@ -75,6 +78,10 @@ export class SessionLineageStore {
     }
     isFork(sessionId) {
         return !!this.entries.get(sessionId)?.parentSessionId;
+    }
+    /** 当前会话的 agent preset；旧 lineage 会在 live session 被 observe 后补齐。 */
+    presetOf(sessionId) {
+        return this.entries.get(sessionId)?.agentPreset;
     }
     flush() {
         return this.writeChain;

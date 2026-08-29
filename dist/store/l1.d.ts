@@ -14,6 +14,8 @@ export interface L1SearchOptions {
     embeddingTimeoutMs?: number;
     /** branch 记忆允许的来源会话（当前会话 + 祖先）；global 不受限制。 */
     visibleSessionIds?: readonly string[];
+    /** preset 记忆允许的 preset id；undefined 时 preset 记录不可见。 */
+    visiblePresetId?: string;
 }
 export declare class L1Store {
     private readonly db;
@@ -75,7 +77,7 @@ export declare class L1Store {
      * 去重候选召回（官方 3 级）：空库跳过 → 向量优先 → FTS 兜底。
      * 传入 family 时只在同族记录里召回（去重永不跨族）。
      */
-    searchCandidates(query: string, limit: number, family?: MemoryFamily, visibleSessionIds?: readonly string[]): Promise<MemoryRecord[]>;
+    searchCandidates(query: string, limit: number, family?: MemoryFamily, visibleSessionIds?: readonly string[], visiblePresetId?: string): Promise<MemoryRecord[]>;
     /**
      * 增量重嵌入（embedding 配置变化 / 周期性补齐用）：只处理缺失向量的记录，
      * 排除已判定"当前 provider 不可嵌入"的 skip 集。返回写入/失败/跳过数——

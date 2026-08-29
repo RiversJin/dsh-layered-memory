@@ -65,6 +65,9 @@ export function registerMemoryTools(
 
   const visibleSessions = (agentId: string | undefined): string[] | undefined =>
     agentId === undefined ? undefined : (lineage?.ancestors(agentId) ?? [agentId]);
+  const presetOf = (agentId: string | undefined): string | undefined =>
+    agentId === undefined ? undefined : lineage?.presetOf(agentId);
+  const presetBinding = (presetId: string): string => `preset:${presetId}`;
 
   // ── memory_commit: 模型显式写入一条已整理的 L1 原子记忆 ──
   ctx.tools.register(
@@ -76,7 +79,7 @@ export function registerMemoryTools(
         content: { type: 'string', required: true, description: '自包含、可独立理解的一条事实或规则' },
         type: { type: 'string', required: true, description: 'persona/episodic/instruction/work_fact/work_task/work_method/work_artifact' },
         priority: { type: 'number', description: '0-100，默认 60' },
-        scope: { type: 'string', description: 'auto（默认）/global/branch；global 跨分支，branch 仅当前分支及其后代' },
+        scope: { type: 'string', description: 'auto（默认）/global/preset/branch；global 对所有会话可见，preset 仅同 agent preset，branch 仅当前分支及其后代' },
         replaces: { type: 'string', description: '要被本条修订替换的旧 memory id；须先搜索确认' },
       },
       output: {
@@ -101,16 +104,29 @@ export function registerMemoryTools(
         const type = args.type.trim() || 'episodic';
         const family = familyForType(type);
         const rawScope = args.scope?.trim();
-        const scope: MemoryScope = rawScope === 'global' || rawScope === 'branch'
+        const callerPreset = presetOf(sid);
+        const scope: MemoryScope = rawScope === 'global' || rawScope === 'preset' || rawScope === 'branch'
           ? rawScope
-          : (lineage?.isFork(sid) || (type !== 'persona' && type !== 'instruction') ? 'branch' : 'global');
+          : ((type === 'persona' || type === 'instruction') && callerPreset ? 'preset'
+            : (type === 'persona' || type === 'instruction') ? 'global' : 'branch');
+        if (scope === 'preset' && !callerPreset) {
+          return { status: 'rejected', id: '', scope, notice: '当前会话没有 agent preset，无法写入 preset 记忆。' };
+        }
+        const bindingSessionId = scope === 'preset' ? presetBinding(callerPreset!) : sid;
         const visible = lineage?.ancestors(sid) ?? [sid];
 
         // 精确语义重复幂等（忽略空白与大小写）；相似但不同的内容不擅自合并。
-        const candidates = await stores.l1.searchCandidates(content, Math.max(stores.l1.size, 20), family, visible);
+        const candidates = await stores.l1.searchCandidates(
+          content,
+          Math.max(stores.l1.size, 20),
+          family,
+          visible,
+          callerPreset,
+        );
         const norm = (s: string): string => s.replace(/\s+/g, ' ').trim().toLocaleLowerCase();
         const duplicate = candidates.find((r) =>
-          r.type === type && (r.scope ?? 'global') === scope && norm(r.content) === norm(content));
+          r.type === type && (r.scope ?? 'global') === scope &&
+          (scope !== 'preset' || r.sessionId === bindingSessionId) && norm(r.content) === norm(content));
         if (duplicate) {
           return { status: 'duplicate', id: duplicate.id, scope, notice: `已有相同记忆（${duplicate.id}），未重复写入。` };
         }
@@ -118,13 +134,18 @@ export function registerMemoryTools(
         let replaced: MemoryRecord | undefined;
         if (args.replaces?.trim()) {
           const target = stores.l1.getByIds([args.replaces.trim()])[0];
-          if (!target || !((target.scope ?? 'global') === 'global' || visible.includes(target.sessionId ?? 'default'))) {
+          const targetScope = target?.scope ?? 'global';
+          const targetVisible = !!target && (
+            targetScope === 'global' ||
+            (targetScope === 'preset' && target.sessionId === presetBinding(callerPreset ?? '')) ||
+            (targetScope === 'branch' && visible.includes(target.sessionId ?? 'default'))
+          );
+          if (!target || !targetVisible) {
             return { status: 'rejected', id: '', scope, notice: '指定的旧记忆不存在或当前分支不可见，未写入。' };
           }
           if ((target.family ?? familyForType(target.type)) !== family) {
             return { status: 'rejected', id: '', scope, notice: '新旧记忆分属不同记忆族，未执行替换。' };
           }
-          const targetScope = target.scope ?? 'global';
           if (targetScope !== scope) {
             return { status: 'rejected', id: '', scope, notice: '新旧记忆可见域不同，未执行替换。' };
           }
@@ -147,13 +168,13 @@ export function registerMemoryTools(
           version: (replaced?.version ?? -1) + 1,
           source_message_ids: currentTurnSourceIds(exec.agent.session.events, sid),
           metadata: { committed_by: 'memory_commit' },
-          sessionId: sid,
+          sessionId: bindingSessionId,
           scope,
           family,
         };
         await stores.l1.appendNew([record]);
         if (replaced) await stores.l1.deleteBatch([replaced.id]);
-        logger.info(`[memory] 显式提交 L1 id=${record.id} type=${type} scope=${scope} session=${sid}${replaced ? ` replaces=${replaced.id}` : ''}`);
+        logger.info(`[memory] 显式提交 L1 id=${record.id} type=${type} scope=${scope} binding=${bindingSessionId} caller=${sid}${replaced ? ` replaces=${replaced.id}` : ''}`);
         return replaced
           ? { status: 'replaced', id: record.id, scope, notice: `记忆已修订（${record.id}）。` }
           : { status: 'stored', id: record.id, scope };
@@ -217,6 +238,7 @@ export function registerMemoryTools(
           type: args.type || undefined,
           family: family ?? undefined,
           visibleSessionIds: visibleSessions(exec.agent?.id),
+          visiblePresetId: presetOf(exec.agent?.id),
         });
         return {
           items: hits.map((h) => ({

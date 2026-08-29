@@ -4017,16 +4017,18 @@ async function main(): Promise<void> {
     try {
       const lineage = new SessionLineageStore(tmp34, silentLogger);
       await lineage.init();
-      const fakeSession = (id: string, parent?: string, seedLength?: number) => ({
+      const fakeSession = (id: string, parent?: string, seedLength?: number, agentPreset?: string) => ({
         id,
-        header: { id, version: 0, createdAt: Date.now(), parentSession: parent, seedLength },
+        header: { id, version: 0, createdAt: Date.now(), parentSession: parent, seedLength, agentPreset },
       });
-      lineage.observe(fakeSession('root') as never);
+      lineage.observe(fakeSession('root', undefined, undefined, 'qiyue') as never);
       lineage.observe(fakeSession('child-a', 'root', 12) as never);
       lineage.observe(fakeSession('grandchild-a', 'child-a', 24) as never);
       lineage.observe(fakeSession('child-b', 'root', 12) as never);
+      lineage.observe(fakeSession('plain') as never);
       assert(lineage.ancestors('grandchild-a').join('>') === 'grandchild-a>child-a>root', '祖先链按当前→根排列');
       assert(!lineage.ancestors('child-a').includes('child-b'), '兄弟分支不可见');
+      assert(lineage.presetOf('grandchild-a') === 'qiyue', 'fork 缺 preset 字段时继承祖先 preset');
 
       const modes = new SessionModeStore(tmp34, 'auto', silentLogger);
       await modes.init();
@@ -4048,19 +4050,32 @@ async function main(): Promise<void> {
       assert(l0Visible.some((r) => r.id === 'l0-root') && l0Visible.some((r) => r.id === 'l0-a'), 'L0 当前分支可见自身与祖先');
       assert(!l0Visible.some((r) => r.id === 'l0-b'), 'L0 严格隔离兄弟分支');
 
-      const rec = (id: string, sessionId: string, scope: 'global' | 'branch', content: string) => ({
+      const rec = (id: string, sessionId: string, scope: 'global' | 'preset' | 'branch', content: string) => ({
         id, sessionId, scope, content, type: 'instruction', priority: 60, scene_name: 'test',
         timestamps: [now], createdAt: now, updatedAt: now,
       });
       await l1.appendNew([
         rec('l1-global', 'elsewhere', 'global', '谱系结构化关键词 全局'),
+        rec('l1-preset', 'preset:qiyue', 'preset', '谱系结构化关键词 栖月预设'),
+        rec('l1-other-preset', 'preset:other', 'preset', '谱系结构化关键词 其他预设'),
         rec('l1-root', 'root', 'branch', '谱系结构化关键词 根'),
         rec('l1-a', 'child-a', 'branch', '谱系结构化关键词 A'),
         rec('l1-b', 'child-b', 'branch', '谱系结构化关键词 B'),
       ]);
-      const l1Visible = await l1.search('谱系结构化关键词', 10, { visibleSessionIds: lineage.ancestors('child-a') });
-      assert(l1Visible.some((r) => r.id === 'l1-global') && l1Visible.some((r) => r.id === 'l1-root') && l1Visible.some((r) => r.id === 'l1-a'), 'L1 global + 当前分支祖先可见');
+      const l1Visible = await l1.search('谱系结构化关键词', 10, {
+        visibleSessionIds: lineage.ancestors('child-a'),
+        visiblePresetId: lineage.presetOf('child-a'),
+      });
+      assert(l1Visible.some((r) => r.id === 'l1-global') && l1Visible.some((r) => r.id === 'l1-preset') && l1Visible.some((r) => r.id === 'l1-root') && l1Visible.some((r) => r.id === 'l1-a'), 'L1 global + 同 preset + 当前分支祖先可见');
       assert(!l1Visible.some((r) => r.id === 'l1-b'), 'L1 branch 隔离兄弟分支');
+      assert(!l1Visible.some((r) => r.id === 'l1-other-preset'), 'L1 preset 隔离其他 agent preset');
+      const adminVisible = await l1.search('谱系结构化关键词', 10);
+      assert(adminVisible.some((r) => r.id === 'l1-other-preset') && adminVisible.some((r) => r.id === 'l1-b'), '未传可见域的管理/内部路径保持全库视图');
+      const plainVisible = await l1.search('谱系结构化关键词', 10, {
+        visibleSessionIds: lineage.ancestors('plain'),
+        visiblePresetId: lineage.presetOf('plain'),
+      });
+      assert(plainVisible.some((r) => r.id === 'l1-global') && !plainVisible.some((r) => r.id === 'l1-preset'), '无 preset 的普通会话只见 global，不见栖月记忆');
 
       const specs: Record<string, unknown> = {};
       const toolCtx = { tools: { register: (spec: { name: string }) => { specs[spec.name] = spec; return () => {}; } } } as never;
@@ -4088,6 +4103,12 @@ async function main(): Promise<void> {
         agentExec,
       );
       assert(duplicate.status === 'duplicate' && duplicate.id === committed.id, 'memory_commit 精确重复幂等');
+      const presetCommit = await commit.execute(
+        { content: '栖月预设内长期稳定的称呼约定', type: 'instruction', priority: 85 },
+        agentExec,
+      );
+      const presetSaved = l1.getByIds([presetCommit.id])[0];
+      assert(presetCommit.status === 'stored' && presetSaved.scope === 'preset' && presetSaved.sessionId === 'preset:qiyue', 'memory_commit 稳定记忆 auto 绑定当前 agent preset');
 
       const old = now - 100 * 86_400_000;
       await l0.append('child-a', [

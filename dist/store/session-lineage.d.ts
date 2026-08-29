@@ -14,6 +14,8 @@ export declare class SessionLineageStore {
     /** 当前会话到根会话，遇损坏环路安全截断。 */
     ancestors(sessionId: string): string[];
     isFork(sessionId: string): boolean;
+    /** 当前会话的 agent preset；旧 lineage 会在 live session 被 observe 后补齐。 */
+    presetOf(sessionId: string): string | undefined;
     flush(): Promise<void>;
     private repairDescendantRoots;
     private queuePersist;

@@ -29,6 +29,21 @@ export interface L1SearchOptions {
   embeddingTimeoutMs?: number;
   /** branch 记忆允许的来源会话（当前会话 + 祖先）；global 不受限制。 */
   visibleSessionIds?: readonly string[];
+  /** preset 记忆允许的 preset id；undefined 时 preset 记录不可见。 */
+  visiblePresetId?: string;
+}
+
+const presetBinding = (presetId: string): string => `preset:${presetId}`;
+
+function isVisibleRecord(
+  record: MemoryRecord,
+  visibleSessionIds: readonly string[] | undefined,
+  visiblePresetId: string | undefined,
+): boolean {
+  const scope = record.scope ?? 'global';
+  if (scope === 'global') return true;
+  if (scope === 'preset') return !!visiblePresetId && record.sessionId === presetBinding(visiblePresetId);
+  return !!visibleSessionIds?.includes(record.sessionId ?? 'default');
 }
 
 /** 官方过度召回倍数：候选池 = limit × 3（官方 tool 路径同款）。 */
@@ -181,7 +196,7 @@ export class L1Store {
     let strategy: RecallStrategy | 'none' = this.strategy;
     if (strategy !== 'keyword' && !canVec) strategy = caps.ftsSearch ? 'keyword' : 'none';
 
-    const candidateK = opts?.visibleSessionIds
+    const candidateK = opts?.visibleSessionIds || opts?.visiblePresetId
       ? Math.max(this.db.countL1(), limit)
       : limit * CANDIDATE_MULTIPLIER;
     const threshold = opts?.scoreThreshold ?? 0;
@@ -250,15 +265,13 @@ export class L1Store {
     limit: number,
     family?: MemoryFamily,
     visibleSessionIds?: readonly string[],
+    visiblePresetId?: string,
   ): Promise<MemoryRecord[]> {
     if (this.db.countL1() === 0) return [];
-    const candidateK = visibleSessionIds ? this.db.countL1() : limit;
+    const candidateK = visibleSessionIds || visiblePresetId ? this.db.countL1() : limit;
     const filter = (records: MemoryRecord[]): MemoryRecord[] => {
-      if (!visibleSessionIds) return records.slice(0, limit);
-      const visible = new Set(visibleSessionIds);
-      return records
-        .filter((r) => (r.scope ?? 'global') === 'global' || visible.has(r.sessionId ?? 'default'))
-        .slice(0, limit);
+      if (!visibleSessionIds && !visiblePresetId) return records.slice(0, limit);
+      return records.filter((r) => isVisibleRecord(r, visibleSessionIds, visiblePresetId)).slice(0, limit);
     };
     const caps = this.db.getCapabilities();
     if (caps.vectorSearch && this.helper.vectorReady()) {
@@ -272,7 +285,7 @@ export class L1Store {
         this.logger?.warn(`[memory] 向量候选召回失败，降级 FTS: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    const fts = this.db.searchL1Fts(query, visibleSessionIds ? candidateK : limit * 2, family);
+    const fts = this.db.searchL1Fts(query, visibleSessionIds || visiblePresetId ? candidateK : limit * 2, family);
     return filter(this.db.getL1ByIds(fts.map((h) => h.id)));
   }
 
@@ -335,12 +348,11 @@ export class L1Store {
 
   private postProcess(hits: L1Hit[], opts: L1SearchOptions | undefined, limit: number): L1Hit[] {
     let filtered = opts?.type ? hits.filter((h) => h.type === opts.type) : hits;
-    if (opts?.visibleSessionIds) {
-      const visible = new Set(opts.visibleSessionIds);
+    if (opts?.visibleSessionIds || opts?.visiblePresetId) {
       const records = new Map(this.db.getL1ByIds(filtered.map((h) => h.id)).map((r) => [r.id, r]));
       filtered = filtered.filter((h) => {
         const r = records.get(h.id);
-        return !!r && ((r.scope ?? 'global') === 'global' || visible.has(r.sessionId ?? 'default'));
+        return !!r && isVisibleRecord(r, opts.visibleSessionIds, opts.visiblePresetId);
       });
     }
     return filtered.slice(0, limit);
