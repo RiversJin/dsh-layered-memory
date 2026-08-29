@@ -27,6 +27,8 @@ export interface L1SearchOptions {
   scoreThreshold?: number;
   /** 嵌入查询内层钳制（ms，只缩短不放大；召回路径传入给 FTS 降级留时间）。 */
   embeddingTimeoutMs?: number;
+  /** branch 记忆允许的来源会话（当前会话 + 祖先）；global 不受限制。 */
+  visibleSessionIds?: readonly string[];
 }
 
 /** 官方过度召回倍数：候选池 = limit × 3（官方 tool 路径同款）。 */
@@ -110,6 +112,13 @@ export class L1Store {
     return this.db.getL1ByIds(ids);
   }
 
+  /** 所有仍被 L1 引用的 L0 证据 id（保留策略保护集）。 */
+  referencedMessageIds(): Set<string> {
+    const out = new Set<string>();
+    for (const r of this.db.getAllL1()) for (const id of r.source_message_ids ?? []) out.add(id);
+    return out;
+  }
+
   /** 新记忆落盘：JSONL 按天追加（事实源）+ 检索库 upsert + 向量。 */
   async appendNew(records: MemoryRecord[]): Promise<void> {
     if (records.length === 0) return;
@@ -172,23 +181,25 @@ export class L1Store {
     let strategy: RecallStrategy | 'none' = this.strategy;
     if (strategy !== 'keyword' && !canVec) strategy = caps.ftsSearch ? 'keyword' : 'none';
 
-    const candidateK = limit * CANDIDATE_MULTIPLIER;
+    const candidateK = opts?.visibleSessionIds
+      ? Math.max(this.db.countL1(), limit)
+      : limit * CANDIDATE_MULTIPLIER;
     const threshold = opts?.scoreThreshold ?? 0;
 
     if (strategy === 'none') return [];
     if (strategy === 'keyword') {
       const fts = this.db.searchL1Fts(query, candidateK, opts?.family);
-      return this.postProcess(this.applyDecay(applyFtsThreshold(fts, threshold, limit)), opts?.type, limit);
+      return this.postProcess(this.applyDecay(applyFtsThreshold(fts, threshold, limit)), opts, limit);
     }
     if (strategy === 'embedding') {
       const vec = await this.helper.query(query, opts?.embeddingTimeoutMs);
       if (!vec) {
         // embedding 调用失败：降级 FTS，不阻断
         const fts = this.db.searchL1Fts(query, candidateK, opts?.family);
-        return this.postProcess(this.applyDecay(applyFtsThreshold(fts, threshold, limit)), opts?.type, limit);
+        return this.postProcess(this.applyDecay(applyFtsThreshold(fts, threshold, limit)), opts, limit);
       }
       const vecHits = this.db.searchL1Vector(vec, candidateK, opts?.family);
-      return this.postProcess(this.applyDecay(filterScore(vecHits, threshold)), opts?.type, limit);
+      return this.postProcess(this.applyDecay(filterScore(vecHits, threshold)), opts, limit);
     }
 
     // hybrid（官方语义）：双路并行 → 完整列表 RRF 融合（融合前不过滤阈值）
@@ -201,7 +212,7 @@ export class L1Store {
     const merged = rrfMerge([ftsList, vecList], (h) => h.id);
     return this.postProcess(
       this.applyDecay(merged.map(({ rrfScore, ...h }) => ({ ...h, score: normalizeRrf(rrfScore) }))),
-      opts?.type,
+      opts,
       limit,
     );
   }
@@ -234,22 +245,35 @@ export class L1Store {
    * 去重候选召回（官方 3 级）：空库跳过 → 向量优先 → FTS 兜底。
    * 传入 family 时只在同族记录里召回（去重永不跨族）。
    */
-  async searchCandidates(query: string, limit: number, family?: MemoryFamily): Promise<MemoryRecord[]> {
+  async searchCandidates(
+    query: string,
+    limit: number,
+    family?: MemoryFamily,
+    visibleSessionIds?: readonly string[],
+  ): Promise<MemoryRecord[]> {
     if (this.db.countL1() === 0) return [];
+    const candidateK = visibleSessionIds ? this.db.countL1() : limit;
+    const filter = (records: MemoryRecord[]): MemoryRecord[] => {
+      if (!visibleSessionIds) return records.slice(0, limit);
+      const visible = new Set(visibleSessionIds);
+      return records
+        .filter((r) => (r.scope ?? 'global') === 'global' || visible.has(r.sessionId ?? 'default'))
+        .slice(0, limit);
+    };
     const caps = this.db.getCapabilities();
     if (caps.vectorSearch && this.helper.vectorReady()) {
       try {
         const vec = await this.helper.query(query);
         if (vec) {
-          const hits = this.db.searchL1Vector(vec, limit, family);
-          if (hits.length > 0) return this.db.getL1ByIds(hits.map((h) => h.id));
+          const hits = this.db.searchL1Vector(vec, candidateK, family);
+          if (hits.length > 0) return filter(this.db.getL1ByIds(hits.map((h) => h.id)));
         }
       } catch (err) {
         this.logger?.warn(`[memory] 向量候选召回失败，降级 FTS: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    const fts = this.db.searchL1Fts(query, limit * 2, family);
-    return this.db.getL1ByIds(fts.map((h) => h.id));
+    const fts = this.db.searchL1Fts(query, visibleSessionIds ? candidateK : limit * 2, family);
+    return filter(this.db.getL1ByIds(fts.map((h) => h.id)));
   }
 
   /**
@@ -309,8 +333,16 @@ export class L1Store {
     return { written, failed, skipped, cancelled };
   }
 
-  private postProcess(hits: L1Hit[], type: string | undefined, limit: number): L1Hit[] {
-    const filtered = type ? hits.filter((h) => h.type === type) : hits;
+  private postProcess(hits: L1Hit[], opts: L1SearchOptions | undefined, limit: number): L1Hit[] {
+    let filtered = opts?.type ? hits.filter((h) => h.type === opts.type) : hits;
+    if (opts?.visibleSessionIds) {
+      const visible = new Set(opts.visibleSessionIds);
+      const records = new Map(this.db.getL1ByIds(filtered.map((h) => h.id)).map((r) => [r.id, r]));
+      filtered = filtered.filter((h) => {
+        const r = records.get(h.id);
+        return !!r && ((r.scope ?? 'global') === 'global' || visible.has(r.sessionId ?? 'default'));
+      });
+    }
     return filtered.slice(0, limit);
   }
 }

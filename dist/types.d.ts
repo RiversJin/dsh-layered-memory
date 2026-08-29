@@ -7,6 +7,16 @@ export type MemoryFamily = 'chat' | 'work';
 export type MemoryMode = 'auto' | 'chat' | 'work' | 'off';
 /** 蒸馏可用的档位（off 在捕获侧被拦截，永远到不了管线）。 */
 export type ExtractMode = 'auto' | 'chat' | 'work';
+/** 记忆可见域：global 对所有分支可见；branch 仅对来源分支及其后代可见。 */
+export type MemoryScope = 'global' | 'branch';
+/** DSH fork 谱系的持久化投影。 */
+export interface SessionLineage {
+    sessionId: string;
+    rootSessionId: string;
+    parentSessionId?: string;
+    seedLength?: number;
+    createdAt: number;
+}
 /** 记忆族标签推断：work_* 前缀 → work，其余（含 auto 档兜底）→ chat。 */
 export declare function familyForType(type: string): MemoryFamily;
 /** 日志接口（适配 ctx.logger）。 */
@@ -65,12 +75,14 @@ export interface MemoryRecord {
     updatedAt: number;
     /** 每次 update/merge 合并 +1（官方语义）。 */
     version?: number;
-    /** 来源消息 id（JSONL 事实源保留；检索库不存储该列）。 */
+    /** 来源 L0 消息 id；检索库保留，用于证据追溯与 L0 保留豁免。 */
     source_message_ids?: string[];
     /** 类型附加信息（episodic 的活动起止时间等）。 */
     metadata?: Record<string, unknown>;
     /** 来源会话（缺省 default；跨会话记忆共享）。 */
     sessionId?: string;
+    /** 可见域；旧数据缺省视为 global，保持升级前的跨会话可见语义。 */
+    scope?: MemoryScope;
     /** 所属族（写入时缺省由 familyForType(type) 回填；召回/浏览/去重候选按族过滤的唯一依据）。 */
     family?: MemoryFamily;
 }

@@ -28,6 +28,12 @@ export interface MemoryConfig {
     stripCodeBlocks: boolean;
     /** 单条消息内容最大字符数。 */
     maxMessageChars: number;
+    /** 是否捕获模型 reasoning 块；默认关闭，避免把内部推理写进长期证据。 */
+    includeReasoning: boolean;
+    /** 是否为 L0 同步生成向量；默认关闭，L0 使用 FTS，避免拖慢每轮落盘。 */
+    indexEmbeddings: boolean;
+    /** L0 可检索保留天数；被 L1 source_message_ids 引用的证据不清理，0=永久。 */
+    retentionDays: number;
   };
   extract: {
     enabled: boolean;
@@ -149,9 +155,13 @@ export const memorySchema = Schema.object({
     enabled: Schema.boolean().default(true),
     stripCodeBlocks: Schema.boolean().default(true),
     maxMessageChars: Schema.number().min(200).max(200_000).default(4000),
+    includeReasoning: Schema.boolean().default(false),
+    indexEmbeddings: Schema.boolean().default(false),
+    retentionDays: Schema.number().min(0).max(3650).default(90),
   }),
   extract: Schema.object({
-    enabled: Schema.boolean().default(true),
+    // 长期记忆默认由模型显式 memory_commit；自动抽取仅作兼容开关。
+    enabled: Schema.boolean().default(false),
     minMessages: Schema.number().min(1).max(100).default(6),
     idleSeconds: Schema.number().min(0).max(86_400).default(300),
     backgroundMessages: Schema.number().min(0).max(50).default(10),

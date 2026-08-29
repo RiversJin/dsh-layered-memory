@@ -4,13 +4,13 @@
  *
  * 冷启动保护：插件激活时间之前的事件不捕获（防止恢复会话时倾倒全部历史）。
  */
-import { randomBytes } from 'node:crypto';
 import type { Context } from '@deepseek-ai/cordis';
 import type { AssistantMessage, UserMessage } from '@deepseek-ai/dsh-llm';
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
 import type { MemoryConfig } from '../config.js';
 import type { MemoryRunner } from '../pipeline/runner.js';
 import type { SessionModeStore } from '../store/session-modes.js';
+import type { SessionLineageStore } from '../store/session-lineage.js';
 import type { L0Store } from '../store/l0.js';
 import type { LiveSettingsHandle } from '../settings.js';
 import type { ConversationMessage, MemoryLogger } from '../types.js';
@@ -77,6 +77,7 @@ export function registerCapture(
   logger: MemoryLogger,
   live: LiveSettingsHandle,
   modes: SessionModeStore,
+  lineage?: SessionLineageStore,
 ): (() => Promise<void>) | undefined {
   if (!cfg.capture.enabled) return;
   const startFloor = Date.now();
@@ -90,6 +91,7 @@ export function registerCapture(
       const s = live.get();
       if (!s.enabled || !s.capture) return;
       const sid = String(session.id ?? session);
+      lineage?.observe(session);
       // off 档：本会话对记忆系统完全隐身（不缓冲、不写 L0、不蒸馏）
       if (modes.get(sid) === 'off') return;
       if (!isCaptureRelevant(event.type)) return;
@@ -107,7 +109,7 @@ export function registerCapture(
       if (event.type === 'turn/end') {
         const turn = event.data.turn;
         const turnEvents = buffers.takeTurn(sid, turn);
-        const messages = turnEventsToMessages(turnEvents, cfg, logger);
+        const messages = turnEventsToMessages(sid, turnEvents, cfg, logger);
         if (messages.length > 0) {
           const roles = messages.reduce<Record<string, number>>((acc, m) => {
             acc[m.role] = (acc[m.role] ?? 0) + 1;
@@ -132,7 +134,8 @@ export function registerCapture(
             .catch((err) =>
               logger.warn(`[memory] L0 落盘失败: ${err instanceof Error ? err.message : String(err)}`),
             );
-          runner.enqueue(sid, messages, mode);
+          // undefined 仅出现在旧版直接构造配置/测试缝；保持升级前行为。Schema 新默认明确为 false。
+          if (cfg.extract?.enabled !== false) runner.enqueue(sid, messages, mode);
         }
       }
     } catch (err) {
@@ -180,6 +183,7 @@ function findTurnStart(buf: SessionEvent[], turn: number): number {
 
 /** 把轮次事件转成 L0 消息（仅真实 user 消息 + assistant 消息，清洗过滤）。 */
 function turnEventsToMessages(
+  sessionId: string,
   events: SessionEvent[],
   cfg: MemoryConfig,
   logger: MemoryLogger,
@@ -193,16 +197,16 @@ function turnEventsToMessages(
         logger.info(`[memory] L0 跳过非用户来源消息（source.kind=${msg.source?.kind ?? 'none'}）`);
         continue;
       }
-      const content = sanitizeText(blocksToText(msg.content));
+      const content = sanitizeText(blocksToText(msg.content, cfg.capture.includeReasoning));
       if (shouldCaptureL0(content)) {
-        out.push(makeMessage('user', content, event.time, cfg.capture.maxMessageChars));
+        out.push(makeMessage(sessionId, event.seq, 'user', content, event.time, cfg.capture.maxMessageChars));
       }
     } else if (event.type === 'assistant/message') {
       const data = event.data as { message: AssistantMessage };
-      let content = sanitizeText(blocksToText(data.message?.content));
+      let content = sanitizeText(blocksToText(data.message?.content, cfg.capture.includeReasoning));
       if (cfg.capture.stripCodeBlocks) content = stripCodeBlocks(content);
       if (shouldCaptureL0(content)) {
-        out.push(makeMessage('assistant', content, event.time, cfg.capture.maxMessageChars));
+        out.push(makeMessage(sessionId, event.seq, 'assistant', content, event.time, cfg.capture.maxMessageChars));
       }
     }
   }
@@ -213,13 +217,16 @@ function turnEventsToMessages(
 }
 
 function makeMessage(
+  sessionId: string,
+  seq: number,
   role: 'user' | 'assistant',
   content: string,
   timestamp: number,
   maxChars: number,
 ): ConversationMessage {
   return {
-    id: `msg_${Date.now()}_${randomBytes(3).toString('hex')}`,
+    // fork 的 seed 事件不会重新发布；session+seq 因而稳定、幂等，并可在工具执行时预先引用。
+    id: `l0:${sessionId}:${seq}`,
     role,
     content: content.slice(0, maxChars),
     timestamp,

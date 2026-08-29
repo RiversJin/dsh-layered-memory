@@ -7,6 +7,10 @@
 
 **DeepSeek Harness 的分层蒸馏记忆插件：对话在后台自动完成 L0 捕获 → L1 原子记忆 → L2 场景整合 → L3 画像蒸馏，模型每一步前自动把相关记忆注入上下文。**
 
+> Rivers fork 默认采用显式长期记忆：L0 自动捕获并用 FTS 检索，L1 由模型通过
+> `memory_commit` 主动提交；自动 L1 抽取默认关闭。fork 子会话只记录新增部分，召回与
+> 搜索可见范围为 global + 当前分支 + 祖先，兄弟分支隔离；子会话继承父会话记忆档位。
+
 [English](README.en.md) · [最新发行版](https://github.com/JunNanLYS/dsh-layered-memory/releases/latest) · [反馈问题](https://github.com/JunNanLYS/dsh-layered-memory/issues)
 
 [![npm version](https://img.shields.io/npm/v/dsh-layered-memory?color=6f83ff&style=flat-square&label=npm)](https://www.npmjs.com/package/dsh-layered-memory)
@@ -83,7 +87,8 @@ L1/L2/L3 层级过滤）、层级 × 时间窗口表格（调用数 / 输出与�
 按模型累计——蒸馏开销一目了然。输入按字符计（dsh 流式 usage 不含输入 token），
 输出与思考按 token 计。
 
-**记忆工具(3):**
+**记忆工具(4):**
+- memory_commit
 - memory_search
 - conversation_search
 - memory_read_scene
@@ -250,7 +255,10 @@ ONNX 量化 **CPU 推理**——无需 API Key，数据不出本机）。本地�
 | `capture.enabled` | `true` | L0 捕获 |
 | `capture.stripCodeBlocks` | `true` | 助手消息剥离代码块 |
 | `capture.maxMessageChars` | `4000` | 单条消息最大字符数 |
-| `extract.enabled` | `true` | L1 抽取 |
+| `capture.includeReasoning` | `false` | 是否把 reasoning 块写入 L0；默认只保存最终正文 |
+| `capture.indexEmbeddings` | `false` | 是否同步为 L0 生成向量；默认 L0 仅 FTS，避免拖慢每轮落盘 |
+| `capture.retentionDays` | `90` | L0 保留天数；被 L1 证据引用的消息豁免；`0` 永久保留 |
+| `extract.enabled` | `false` | 兼容性的自动 L1 抽取开关；默认改用 `memory_commit` 显式提交 |
 | `extract.minMessages` | `6` | 稳态触发阈值：单会话攒够 N 条新消息跑一次 L1 抽取。起步阶段生效阈值从 1 翻倍爬坡到此值（首轮即出记忆，随后自动攒批省调用） |
 | `extract.idleSeconds` | `300` | 闲置兜底：会话静默 N 秒后把未蒸馏切片落袋（接住"没攒够阈值用户就离开"）；`0` 关闭 |
 | `extract.backgroundMessages` | `10` | 抽取时附带的背景消息条数（按会话从 L0 现查，会话间互不污染） |

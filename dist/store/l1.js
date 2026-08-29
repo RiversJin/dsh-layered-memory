@@ -84,6 +84,14 @@ export class L1Store {
     getByIds(ids) {
         return this.db.getL1ByIds(ids);
     }
+    /** 所有仍被 L1 引用的 L0 证据 id（保留策略保护集）。 */
+    referencedMessageIds() {
+        const out = new Set();
+        for (const r of this.db.getAllL1())
+            for (const id of r.source_message_ids ?? [])
+                out.add(id);
+        return out;
+    }
     /** 新记忆落盘：JSONL 按天追加（事实源）+ 检索库 upsert + 向量。 */
     async appendNew(records) {
         if (records.length === 0)
@@ -141,23 +149,25 @@ export class L1Store {
         let strategy = this.strategy;
         if (strategy !== 'keyword' && !canVec)
             strategy = caps.ftsSearch ? 'keyword' : 'none';
-        const candidateK = limit * CANDIDATE_MULTIPLIER;
+        const candidateK = opts?.visibleSessionIds
+            ? Math.max(this.db.countL1(), limit)
+            : limit * CANDIDATE_MULTIPLIER;
         const threshold = opts?.scoreThreshold ?? 0;
         if (strategy === 'none')
             return [];
         if (strategy === 'keyword') {
             const fts = this.db.searchL1Fts(query, candidateK, opts?.family);
-            return this.postProcess(this.applyDecay(applyFtsThreshold(fts, threshold, limit)), opts?.type, limit);
+            return this.postProcess(this.applyDecay(applyFtsThreshold(fts, threshold, limit)), opts, limit);
         }
         if (strategy === 'embedding') {
             const vec = await this.helper.query(query, opts?.embeddingTimeoutMs);
             if (!vec) {
                 // embedding 调用失败：降级 FTS，不阻断
                 const fts = this.db.searchL1Fts(query, candidateK, opts?.family);
-                return this.postProcess(this.applyDecay(applyFtsThreshold(fts, threshold, limit)), opts?.type, limit);
+                return this.postProcess(this.applyDecay(applyFtsThreshold(fts, threshold, limit)), opts, limit);
             }
             const vecHits = this.db.searchL1Vector(vec, candidateK, opts?.family);
-            return this.postProcess(this.applyDecay(filterScore(vecHits, threshold)), opts?.type, limit);
+            return this.postProcess(this.applyDecay(filterScore(vecHits, threshold)), opts, limit);
         }
         // hybrid（官方语义）：双路并行 → 完整列表 RRF 融合（融合前不过滤阈值）
         // → 融合分归一化：rank1 双列表命中 = 1.0，单列表命中 ≤ 0.5，保持 0~1 语义
@@ -167,7 +177,7 @@ export class L1Store {
         ]);
         const vecList = vecRaw ? this.db.searchL1Vector(vecRaw, candidateK, opts?.family) : [];
         const merged = rrfMerge([ftsList, vecList], (h) => h.id);
-        return this.postProcess(this.applyDecay(merged.map(({ rrfScore, ...h }) => ({ ...h, score: normalizeRrf(rrfScore) }))), opts?.type, limit);
+        return this.postProcess(this.applyDecay(merged.map(({ rrfScore, ...h }) => ({ ...h, score: normalizeRrf(rrfScore) }))), opts, limit);
     }
     /**
      * 时效衰减加权（#29）：三路共用的读路径后处理——阈值过滤之后、截断之前
@@ -196,25 +206,34 @@ export class L1Store {
      * 去重候选召回（官方 3 级）：空库跳过 → 向量优先 → FTS 兜底。
      * 传入 family 时只在同族记录里召回（去重永不跨族）。
      */
-    async searchCandidates(query, limit, family) {
+    async searchCandidates(query, limit, family, visibleSessionIds) {
         if (this.db.countL1() === 0)
             return [];
+        const candidateK = visibleSessionIds ? this.db.countL1() : limit;
+        const filter = (records) => {
+            if (!visibleSessionIds)
+                return records.slice(0, limit);
+            const visible = new Set(visibleSessionIds);
+            return records
+                .filter((r) => (r.scope ?? 'global') === 'global' || visible.has(r.sessionId ?? 'default'))
+                .slice(0, limit);
+        };
         const caps = this.db.getCapabilities();
         if (caps.vectorSearch && this.helper.vectorReady()) {
             try {
                 const vec = await this.helper.query(query);
                 if (vec) {
-                    const hits = this.db.searchL1Vector(vec, limit, family);
+                    const hits = this.db.searchL1Vector(vec, candidateK, family);
                     if (hits.length > 0)
-                        return this.db.getL1ByIds(hits.map((h) => h.id));
+                        return filter(this.db.getL1ByIds(hits.map((h) => h.id)));
                 }
             }
             catch (err) {
                 this.logger?.warn(`[memory] 向量候选召回失败，降级 FTS: ${err instanceof Error ? err.message : String(err)}`);
             }
         }
-        const fts = this.db.searchL1Fts(query, limit * 2, family);
-        return this.db.getL1ByIds(fts.map((h) => h.id));
+        const fts = this.db.searchL1Fts(query, visibleSessionIds ? candidateK : limit * 2, family);
+        return filter(this.db.getL1ByIds(fts.map((h) => h.id)));
     }
     /**
      * 增量重嵌入（embedding 配置变化 / 周期性补齐用）：只处理缺失向量的记录，
@@ -272,8 +291,16 @@ export class L1Store {
             this.db.addVecSkippedIds('l1', skippedNow);
         return { written, failed, skipped, cancelled };
     }
-    postProcess(hits, type, limit) {
-        const filtered = type ? hits.filter((h) => h.type === type) : hits;
+    postProcess(hits, opts, limit) {
+        let filtered = opts?.type ? hits.filter((h) => h.type === opts.type) : hits;
+        if (opts?.visibleSessionIds) {
+            const visible = new Set(opts.visibleSessionIds);
+            const records = new Map(this.db.getL1ByIds(filtered.map((h) => h.id)).map((r) => [r.id, r]));
+            filtered = filtered.filter((h) => {
+                const r = records.get(h.id);
+                return !!r && ((r.scope ?? 'global') === 'global' || visible.has(r.sessionId ?? 'default'));
+            });
+        }
         return filtered.slice(0, limit);
     }
 }

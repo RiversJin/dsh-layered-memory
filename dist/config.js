@@ -20,9 +20,13 @@ export const memorySchema = Schema.object({
         enabled: Schema.boolean().default(true),
         stripCodeBlocks: Schema.boolean().default(true),
         maxMessageChars: Schema.number().min(200).max(200_000).default(4000),
+        includeReasoning: Schema.boolean().default(false),
+        indexEmbeddings: Schema.boolean().default(false),
+        retentionDays: Schema.number().min(0).max(3650).default(90),
     }),
     extract: Schema.object({
-        enabled: Schema.boolean().default(true),
+        // 长期记忆默认由模型显式 memory_commit；自动抽取仅作兼容开关。
+        enabled: Schema.boolean().default(false),
         minMessages: Schema.number().min(1).max(100).default(6),
         idleSeconds: Schema.number().min(0).max(86_400).default(300),
         backgroundMessages: Schema.number().min(0).max(50).default(10),

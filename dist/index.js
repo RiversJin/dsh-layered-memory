@@ -36,6 +36,7 @@ import { PersonaStore } from './store/persona.js';
 import { MemoryDb } from './store/sqlite.js';
 import { SceneStore } from './store/scenes.js';
 import { SessionModeStore } from './store/session-modes.js';
+import { SessionLineageStore } from './store/session-lineage.js';
 import { StateStore } from './store/state.js';
 import { registerMemoryTools } from './tools/index.js';
 import { errDetail, withFileLog } from './util/filelog.js';
@@ -43,8 +44,8 @@ import { buildRouteChain, resolveModelRoute, invalidateEffortCache } from './llm
 import { effectiveCfg } from './pipeline/runner.js';
 import { initTokenCost, resetTokenCost } from './token-cost.js';
 export const name = 'dsh-memory-plugin';
-/** 硬依赖：蒸馏要用 llm，工具注册要用 tools，召回注入要用 systemPrompt。 */
-export const inject = ['llm', 'tools', 'systemPrompt'];
+/** 硬依赖：蒸馏用 llm，工具用 tools，召回用 systemPrompt，fork 谱系用 sessions。 */
+export const inject = ['llm', 'tools', 'systemPrompt', 'sessions'];
 /**
  * 插件配置 schema。导出名必须是 `Config`——cordis 运行时只读 plugin.Config
  * （Standard Schema 接口）做校验与默认值填充；导出 `schema` 会被静默忽略，
@@ -80,13 +81,31 @@ export async function apply(ctx, config) {
     let disposed = false;
     // ── 会话档位存储（sessionId → auto/chat/work/off；默认档 = config.family） ──
     const modes = new SessionModeStore(dataDir, config.family, logger);
+    const lineage = new SessionLineageStore(dataDir, logger);
     if (storageOk) {
         try {
-            await modes.init();
+            await Promise.all([modes.init(), lineage.init()]);
         }
         catch (err) {
             logger.warn(`[memory] 会话档位载入失败（降级为默认档内存态）: ${err instanceof Error ? err.message : String(err)}`);
         }
+    }
+    // fork 谱系与会话档位必须在首轮捕获/召回之前落入内存。
+    ctx.on('session/created', (session) => {
+        try {
+            const entry = lineage.observe(session);
+            if (entry.parentSessionId)
+                modes.inherit(entry.sessionId, entry.parentSessionId);
+        }
+        catch (err) {
+            logger.warn(`[memory] fork 谱系登记失败（降级当前会话单点可见）: ${errDetail(err)}`);
+        }
+    }, { global: true });
+    // 插件热装时补观察已存在的 live sessions。
+    for (const session of ctx.sessions.list()) {
+        const entry = lineage.observe(session);
+        if (entry.parentSessionId)
+            modes.inherit(entry.sessionId, entry.parentSessionId);
     }
     // ── 嵌入源三态（D4：远程/本地/关闭）——状态文件优先于静态配置 ──
     const sourceStore = new EmbeddingSourceStore(dataDir, logger);
@@ -132,7 +151,7 @@ export async function apply(ctx, config) {
         }
     }
     const stores = {
-        l0: new L0Store(dataDir, db, embed, logger),
+        l0: new L0Store(dataDir, db, embed, logger, config.capture.indexEmbeddings),
         l1: new L1Store(dataDir, db, embed, config.recall.strategy, logger, config.recall.decayHalfLifeDays),
         // L2/L3 分族隔离：各自目录与文件（scenes/chat|work、persona-chat|work.md）
         scenes: {
@@ -160,6 +179,20 @@ export async function apply(ctx, config) {
             storageOk = false;
             logger.error(`[memory] 存储初始化失败，记忆功能停用: ${err instanceof Error ? err.message : String(err)}`);
         }
+    }
+    // L0 默认 90 天：启动后清一次，之后每日清理；L1 引用的证据永久豁免。
+    if (storageOk && config.capture.retentionDays > 0) {
+        const pruneL0 = () => {
+            void stores.l0.prune(config.capture.retentionDays, stores.l1.referencedMessageIds())
+                .then((n) => { if (n > 0)
+                logger.info(`[memory] L0 过期清理 ${n} 条（被 L1 引用证据已保留）`); })
+                .catch((err) => logger.warn(`[memory] L0 过期清理失败（非致命）: ${errDetail(err)}`));
+        };
+        pruneL0();
+        ctx.effect(() => {
+            const timer = setInterval(pruneL0, 24 * 3600_000);
+            return () => clearInterval(timer);
+        });
     }
     // 检索能力与策略说明（能力位由降级结果决定）
     const caps = db.getCapabilities();
@@ -193,10 +226,13 @@ export async function apply(ctx, config) {
                         // 活切换发起时让路（swap 会 drop 表，并发跑只是白烧嵌入调用）
                         const shouldCancel = () => disposed || !!embedManagerRef?.isBusy();
                         const r1 = await stores.l1.reindex({ shouldCancel });
-                        const r0 = await stores.l0.reindex({ shouldCancel });
+                        const r0 = config.capture.indexEmbeddings
+                            ? await stores.l0.reindex({ shouldCancel })
+                            : { written: 0, failed: 0, skipped: 0 };
                         // missing 复查：嵌入服务未就绪时 reindex 短路 0/0/0——那是"没跑"不是"成功"，
                         // 不得标记 meta（否则启动链不再补，补齐被无限推迟到 backfill）
-                        const missingAfter = db.countL1VecMissing(db.getVecSkipSet('l1')) + db.countL0VecMissing(db.getVecSkipSet('l0'));
+                        const missingAfter = db.countL1VecMissing(db.getVecSkipSet('l1')) +
+                            (config.capture.indexEmbeddings ? db.countL0VecMissing(db.getVecSkipSet('l0')) : 0);
                         if (r1.failed === 0 && r0.failed === 0 && missingAfter === 0) {
                             db.markEmbeddingSynced(currentProviderInfo() ?? info);
                             const skipNote = r1.skipped + r0.skipped > 0 ? `，跳过不可嵌入 ${r1.skipped + r0.skipped} 条` : '';
@@ -236,13 +272,16 @@ export async function apply(ctx, config) {
                         if (embedManagerRef?.isBusy())
                             return;
                         const l1Missing = db.countL1VecMissing(db.getVecSkipSet('l1')) > 0;
-                        const l0Missing = db.countL0VecMissing(db.getVecSkipSet('l0')) > 0;
+                        const l0Missing = config.capture.indexEmbeddings && db.countL0VecMissing(db.getVecSkipSet('l0')) > 0;
                         if (!l1Missing && !l0Missing)
                             return;
                         const shouldCancel = () => disposed || !!embedManagerRef?.isBusy();
                         const r1 = await stores.l1.reindex({ shouldCancel });
-                        const r0 = await stores.l0.reindex({ shouldCancel });
-                        const missingAfter = db.countL1VecMissing(db.getVecSkipSet('l1')) + db.countL0VecMissing(db.getVecSkipSet('l0'));
+                        const r0 = config.capture.indexEmbeddings
+                            ? await stores.l0.reindex({ shouldCancel })
+                            : { written: 0, failed: 0, skipped: 0 };
+                        const missingAfter = db.countL1VecMissing(db.getVecSkipSet('l1')) +
+                            (config.capture.indexEmbeddings ? db.countL0VecMissing(db.getVecSkipSet('l0')) : 0);
                         if (r1.failed === 0 && r0.failed === 0 && missingAfter === 0) {
                             db.markEmbeddingSynced(infoNow);
                             logger.info(`[memory] 向量补齐完成：L1 ${r1.written} 条，L0 ${r0.written} 条（跳过不可嵌入 ${r1.skipped + r0.skipped} 条）`);
@@ -295,11 +334,11 @@ export async function apply(ctx, config) {
         : undefined;
     let flushL0;
     if (storageOk) {
-        flushL0 = registerCapture(ctx, config, runner, stores.l0, logger, live, modes);
+        flushL0 = registerCapture(ctx, config, runner, stores.l0, logger, live, modes, lineage);
     }
-    const recall = registerRecall(ctx, config, stores, logger, live, modes, dataDir);
+    const recall = registerRecall(ctx, config, stores, logger, live, modes, dataDir, lineage);
     runner.setAfterRun(recall.invalidateProfile);
-    registerMemoryTools(ctx, config, stores, logger, modes, live);
+    registerMemoryTools(ctx, config, stores, logger, modes, live, lineage);
     registerMemoryRpc(ctx, config, stores, logger, {
         degraded: () => !storageOk || db.isDegraded(),
         pending: () => runner.pendingCount,
@@ -332,6 +371,7 @@ export async function apply(ctx, config) {
         downloader.dispose();
         return (async () => {
             await flushL0?.();
+            await Promise.all([modes.flush(), lineage.flush()]);
             db.close();
             resetTokenCost();
         })();

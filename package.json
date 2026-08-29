@@ -1,7 +1,7 @@
 {
   "name": "dsh-layered-memory",
-  "version": "0.8.11",
-  "description": "L0~L3 分层蒸馏记忆插件 for DeepSeek Harness：自动捕获对话（L0）、抽取原子记忆（L1）、整合场景块（L2）、蒸馏核心画像/团队方法论（L3），并在模型步骤前自动召回注入。移植自 MemoryCore (TencentDB Agent Memory) 的管线设计。",
+  "version": "0.8.11-rivers.1",
+  "description": "Fork-aware layered memory for DeepSeek Harness: automatic searchable L0, explicit L1 commits, lineage-isolated recall, and optional legacy L1-L3 distillation.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -49,7 +49,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/JunNanLYS/dsh-layered-memory.git"
+    "url": "git+https://github.com/RiversJin/dsh-layered-memory.git"
   },
   "license": "MIT",
   "dependencies": {

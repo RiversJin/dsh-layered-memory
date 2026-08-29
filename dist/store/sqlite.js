@@ -263,13 +263,21 @@ export class MemoryDb {
         created_time TEXT DEFAULT '',
         updated_time TEXT DEFAULT '',
         metadata_json TEXT DEFAULT '{}',
-        family TEXT NOT NULL DEFAULT 'chat'
+        family TEXT NOT NULL DEFAULT 'chat',
+        scope TEXT NOT NULL DEFAULT 'global',
+        source_message_ids_json TEXT NOT NULL DEFAULT '[]'
       )
     `);
         // 旧库缺 family 列 → ALTER 补列，并按 type 前缀回填（幂等：已正确的行不再命中）
         if (!this.hasColumn('l1_records', 'family')) {
             this.db.exec("ALTER TABLE l1_records ADD COLUMN family TEXT NOT NULL DEFAULT 'chat'");
             this.logger?.info(`${TAG} l1_records 补 family 列（旧数据按 type 前缀回填）`);
+        }
+        if (!this.hasColumn('l1_records', 'scope')) {
+            this.db.exec("ALTER TABLE l1_records ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'");
+        }
+        if (!this.hasColumn('l1_records', 'source_message_ids_json')) {
+            this.db.exec("ALTER TABLE l1_records ADD COLUMN source_message_ids_json TEXT NOT NULL DEFAULT '[]'");
         }
         const backfilled = this.db
             .prepare("UPDATE l1_records SET family = 'work' WHERE type LIKE 'work\\_%' ESCAPE '\\' AND family != 'work'")
@@ -281,11 +289,13 @@ export class MemoryDb {
         this.db.exec('CREATE INDEX IF NOT EXISTS idx_l1_ts_start ON l1_records(timestamp_start)');
         this.db.exec('CREATE INDEX IF NOT EXISTS idx_l1_updated ON l1_records(updated_time)');
         this.db.exec('CREATE INDEX IF NOT EXISTS idx_l1_family ON l1_records(family)');
+        this.db.exec('CREATE INDEX IF NOT EXISTS idx_l1_scope_session ON l1_records(scope, session_id)');
         this.stmtUpsertL1 = this.db.prepare(`
       INSERT INTO l1_records (
         record_id, content, type, priority, scene_name, session_id, version,
-        timestamp_str, timestamp_start, timestamp_end, created_time, updated_time, metadata_json, family
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        timestamp_str, timestamp_start, timestamp_end, created_time, updated_time, metadata_json, family,
+        scope, source_message_ids_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(record_id) DO UPDATE SET
         content=excluded.content,
         type=excluded.type,
@@ -297,11 +307,15 @@ export class MemoryDb {
         timestamp_end=excluded.timestamp_end,
         updated_time=excluded.updated_time,
         metadata_json=excluded.metadata_json,
-        family=excluded.family
+        family=excluded.family,
+        session_id=excluded.session_id,
+        scope=excluded.scope,
+        source_message_ids_json=excluded.source_message_ids_json
     `);
         this.stmtGetL1 = this.db.prepare(`
       SELECT record_id, content, type, priority, scene_name, version, timestamp_str,
-             timestamp_start, timestamp_end, created_time, updated_time, metadata_json, family
+             timestamp_start, timestamp_end, created_time, updated_time, metadata_json, family,
+             session_id, scope, source_message_ids_json
       FROM l1_records WHERE record_id = ?
     `);
         this.stmtL1Exists = this.db.prepare('SELECT 1 FROM l1_records WHERE record_id = ?');
@@ -693,7 +707,7 @@ export class MemoryDb {
         // 全扫（批量写整体 O(N²)）。只有主表已有该行（覆盖/合并）才可能有旧 FTS 行需要删。
         // 同批重复 id 也能正确处理：首条插入后，第二条的点查在同一事务内已见新行。
         const ftsExisted = this.ftsAvailable ? this.stmtL1Exists.get(record.id) !== undefined : false;
-        this.stmtUpsertL1.run(record.id, record.content, type, priority, sceneName, record.sessionId ?? 'default', record.version ?? 0, ts.str, ts.start, ts.end, toIso(record.createdAt), toIso(record.updatedAt), JSON.stringify(record.metadata ?? {}), family);
+        this.stmtUpsertL1.run(record.id, record.content, type, priority, sceneName, record.sessionId ?? 'default', record.version ?? 0, ts.str, ts.start, ts.end, toIso(record.createdAt), toIso(record.updatedAt), JSON.stringify(record.metadata ?? {}), family, record.scope ?? 'global', JSON.stringify(record.source_message_ids ?? []));
         // vec0 不支持 ON CONFLICT → 先删后插；零向量跳过（cosine 未定义）
         if (this.stmtDeleteL1Vec && this.stmtInsertL1Vec) {
             this.stmtDeleteL1Vec.run(record.id);
@@ -754,7 +768,7 @@ export class MemoryDb {
             stmt =
                 action === 'delete'
                     ? this.db.prepare(`DELETE FROM ${table} WHERE record_id IN (${ph})`)
-                    : this.db.prepare(`SELECT record_id, content, type, priority, scene_name, version, timestamp_str, created_time, updated_time, metadata_json, family FROM ${table} WHERE record_id IN (${ph})`);
+                    : this.db.prepare(`SELECT record_id, content, type, priority, scene_name, version, timestamp_str, created_time, updated_time, metadata_json, family, session_id, scope, source_message_ids_json FROM ${table} WHERE record_id IN (${ph})`);
             this.inStmts.set(key, stmt);
         }
         return stmt;
@@ -819,7 +833,7 @@ export class MemoryDb {
         if (this.degraded)
             return [];
         const rows = this.db
-            .prepare('SELECT record_id, content, type, priority, scene_name, version, timestamp_str, created_time, updated_time, metadata_json, family FROM l1_records')
+            .prepare('SELECT record_id, content, type, priority, scene_name, version, timestamp_str, created_time, updated_time, metadata_json, family, session_id, scope, source_message_ids_json FROM l1_records')
             .all();
         return rows.map(rowToRecord);
     }
@@ -854,7 +868,7 @@ export class MemoryDb {
             const whereSql = where.length > 0 ? ` WHERE ${where.join(' AND ')}` : '';
             const totalRow = this.db.prepare(`SELECT COUNT(*) AS n FROM l1_records${whereSql}`).get(...params);
             const rows = this.db
-                .prepare(`SELECT record_id, content, type, priority, scene_name, version, timestamp_str, created_time, updated_time, metadata_json, family FROM l1_records${whereSql} ORDER BY updated_time DESC LIMIT ? OFFSET ?`)
+                .prepare(`SELECT record_id, content, type, priority, scene_name, version, timestamp_str, created_time, updated_time, metadata_json, family, session_id, scope, source_message_ids_json FROM l1_records${whereSql} ORDER BY updated_time DESC LIMIT ? OFFSET ?`)
                 .all(...params, opts.limit, opts.offset);
             return { items: rows.map(rowToRecord), total: totalRow?.n ?? 0 };
         }
@@ -1013,6 +1027,43 @@ export class MemoryDb {
             return row?.n ?? 0;
         }
         catch {
+            return 0;
+        }
+    }
+    /** 清理过期 L0；被显式 L1 证据引用的 id 由调用方保护。 */
+    pruneL0Before(timestamp, protectedIds) {
+        if (this.degraded || !(timestamp > 0))
+            return 0;
+        try {
+            const rows = this.db
+                .prepare('SELECT record_id FROM l0_conversations WHERE timestamp < ?')
+                .all(timestamp);
+            const ids = rows.map((r) => r.record_id).filter((id) => !protectedIds.has(id));
+            if (ids.length === 0)
+                return 0;
+            this.db.exec('BEGIN');
+            try {
+                const delMeta = this.db.prepare('DELETE FROM l0_conversations WHERE record_id = ?');
+                for (const id of ids) {
+                    delMeta.run(id);
+                    if (this.stmtDeleteL0Vec)
+                        this.stmtDeleteL0Vec.run(id);
+                    if (this.ftsAvailable)
+                        this.stmtL0FtsDelete.run(id);
+                }
+                this.db.exec('COMMIT');
+                return ids.length;
+            }
+            catch (err) {
+                try {
+                    this.db.exec('ROLLBACK');
+                }
+                catch { /* ignore */ }
+                throw err;
+            }
+        }
+        catch (err) {
+            this.logger?.warn(`${TAG} L0 过期清理失败（非致命）: ${err instanceof Error ? err.message : String(err)}`);
             return 0;
         }
     }
@@ -1431,6 +1482,15 @@ function rowToRecord(row) {
     catch {
         /* 坏 JSON 容忍 */
     }
+    let sourceIds = [];
+    try {
+        const parsed = JSON.parse(row.source_message_ids_json || '[]');
+        if (Array.isArray(parsed))
+            sourceIds = parsed.filter((v) => typeof v === 'string');
+    }
+    catch {
+        /* 坏 JSON 容忍 */
+    }
     return {
         id: row.record_id,
         content: row.content,
@@ -1443,6 +1503,9 @@ function rowToRecord(row) {
         version: row.version ?? 0,
         metadata,
         family: normFamily(row.family, row.type),
+        sessionId: row.session_id ?? 'default',
+        scope: row.scope === 'branch' ? 'branch' : 'global',
+        source_message_ids: sourceIds,
     };
 }
 function timestampsToDb(ts) {

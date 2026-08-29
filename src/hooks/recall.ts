@@ -28,6 +28,7 @@ import { RecallDedupeStore } from '../store/recall-dedupe.js';
 import { OccupancyStore } from '../store/occupancy.js';
 import type { SceneStore } from '../store/scenes.js';
 import type { SessionModeStore } from '../store/session-modes.js';
+import type { SessionLineageStore } from '../store/session-lineage.js';
 import type { L1Hit, MemoryLogger } from '../types.js';
 import { applyRecallBudget, raceRecallTimeout, RECALL_EMBED_CAP_MS } from '../util/recall-budget.js';
 import {
@@ -91,6 +92,7 @@ const MEMORY_TOOLS_GUIDE = `<memory-tools-guide>
 - **memory_search**：搜索结构化记忆（L1），适用于回忆用户偏好、历史事件、项目事实、任务、规则等。
 - **conversation_search**：搜索原始对话（L0），适用于查找具体消息原文、时间线、上下文细节。
 - **memory_read_scene**：读取记忆文件详情（L2 场景块，如场景目录下的 .md 文件；也可读 persona.md）。
+- **memory_commit**：当用户明确表达稳定偏好、长期规则或值得跨轮次保留的事实时，显式保存一条原子记忆。临时信息不要保存。
 
 ### ⚠️ 调用次数限制
 每轮对话中，memory_search 和 conversation_search **合计最多调用 3 次**。
@@ -150,6 +152,7 @@ export function registerRecall(
   live: LiveSettingsHandle,
   modes: SessionModeStore,
   dataDir: string,
+  lineage?: SessionLineageStore,
 ): RecallHooks {
   /** 召回去重存储（同会话已注入的记忆不再重复注入；写穿持久化，重启不丢）。 */
   const dedupe = new RecallDedupeStore(dataDir, logger);
@@ -261,6 +264,7 @@ export function registerRecall(
               family: mode === 'auto' ? undefined : mode,
               // 嵌入内层钳制：给 FTS 降级留出总预算内的时间（远程限 HTTP fetch；本地经 worker 代理 race 放弃）
               embeddingTimeoutMs: RECALL_EMBED_CAP_MS,
+              visibleSessionIds: lineage?.ancestors(payload.agent.id) ?? [payload.agent.id],
             }),
             cfg.recall.timeoutMs,
           );

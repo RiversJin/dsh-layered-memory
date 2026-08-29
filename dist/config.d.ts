@@ -24,6 +24,12 @@ export interface MemoryConfig {
         stripCodeBlocks: boolean;
         /** 单条消息内容最大字符数。 */
         maxMessageChars: number;
+        /** 是否捕获模型 reasoning 块；默认关闭，避免把内部推理写进长期证据。 */
+        includeReasoning: boolean;
+        /** 是否为 L0 同步生成向量；默认关闭，L0 使用 FTS，避免拖慢每轮落盘。 */
+        indexEmbeddings: boolean;
+        /** L0 可检索保留天数；被 L1 source_message_ids 引用的证据不清理，0=永久。 */
+        retentionDays: number;
     };
     extract: {
         enabled: boolean;
@@ -149,10 +155,16 @@ export declare const memorySchema: Schema<Schemastery.ObjectS<{
         enabled: Schema<boolean, boolean>;
         stripCodeBlocks: Schema<boolean, boolean>;
         maxMessageChars: Schema<number, number>;
+        includeReasoning: Schema<boolean, boolean>;
+        indexEmbeddings: Schema<boolean, boolean>;
+        retentionDays: Schema<number, number>;
     }>, Schemastery.ObjectT<{
         enabled: Schema<boolean, boolean>;
         stripCodeBlocks: Schema<boolean, boolean>;
         maxMessageChars: Schema<number, number>;
+        includeReasoning: Schema<boolean, boolean>;
+        indexEmbeddings: Schema<boolean, boolean>;
+        retentionDays: Schema<number, number>;
     }>>;
     extract: Schema<Schemastery.ObjectS<{
         enabled: Schema<boolean, boolean>;
@@ -394,10 +406,16 @@ export declare const memorySchema: Schema<Schemastery.ObjectS<{
         enabled: Schema<boolean, boolean>;
         stripCodeBlocks: Schema<boolean, boolean>;
         maxMessageChars: Schema<number, number>;
+        includeReasoning: Schema<boolean, boolean>;
+        indexEmbeddings: Schema<boolean, boolean>;
+        retentionDays: Schema<number, number>;
     }>, Schemastery.ObjectT<{
         enabled: Schema<boolean, boolean>;
         stripCodeBlocks: Schema<boolean, boolean>;
         maxMessageChars: Schema<number, number>;
+        includeReasoning: Schema<boolean, boolean>;
+        indexEmbeddings: Schema<boolean, boolean>;
+        retentionDays: Schema<number, number>;
     }>>;
     extract: Schema<Schemastery.ObjectS<{
         enabled: Schema<boolean, boolean>;

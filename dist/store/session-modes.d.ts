@@ -17,6 +17,9 @@ export declare class SessionModeStore {
     get default(): MemoryMode;
     /** 同步读取：未设置过的会话返回默认档。 */
     get(sessionId: string): MemoryMode;
+    has(sessionId: string): boolean;
+    /** fork 子会话继承父会话的档位与只写覆盖；已有显式子配置不覆盖。 */
+    inherit(childSessionId: string, parentSessionId: string): void;
     /** 会话级注入覆盖原始值（#38）：undefined = 未覆盖，跟随全局。 */
     getRecall(sessionId: string): boolean | undefined;
     /** 解析后的注入开关：会话覆盖 ?? 全局运行时开关（部署级 cfg.recall.enabled

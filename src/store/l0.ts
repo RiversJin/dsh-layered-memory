@@ -7,7 +7,7 @@ import { existsSync, promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import type { ConversationMessage, L0MessageRecord, MemoryLogger } from '../types.js';
 import { EmbedHelper, NoopEmbeddingService, type EmbeddingService } from './embedding.js';
-import { appendJsonl, dayKey, ensureDir, nowIso, readJsonl } from './io.js';
+import { appendJsonl, atomicWriteText, dayKey, ensureDir, nowIso, readJsonl } from './io.js';
 import { rrfMerge } from './search-utils.js';
 import { isZeroVector, type MemoryDb } from './sqlite.js';
 
@@ -26,6 +26,7 @@ export class L0Store {
     private readonly db: MemoryDb,
     embed: EmbeddingService = new NoopEmbeddingService(),
     logger?: MemoryLogger,
+    private readonly indexEmbeddings = true,
   ) {
     this.dir = path.join(dataDir, 'conversations');
     this.legacyDir = path.join(dataDir, 'l0');
@@ -105,7 +106,7 @@ export class L0Store {
     // 检索引擎：DB + 向量（嵌入失败只跳过向量，不影响元数据/FTS，backfill 补齐）。
     // 双写失败闭环：JSONL 事实源已先行追加，DB 缺行 = 这些消息检索不可见
     // （conversation_search / 蒸馏背景参考都查不到）——升 error 并给自愈指引。
-    const vecs = await this.helper.batch(records.map((r) => r.content));
+    const vecs = this.indexEmbeddings ? await this.helper.batch(records.map((r) => r.content)) : undefined;
     if (!this.db.upsertL0Batch(records, vecs)) {
       this.logger?.error(
         `[memory] L0 检索库批量写入失败（${records.length} 条，JSONL 事实源完好），` +
@@ -125,27 +126,61 @@ export class L0Store {
     return this.db.countL0BySession(sessionId);
   }
 
+  /**
+   * 清理可检索 L0 与过期 JSONL。含受保护证据的旧日分片只保留被引用行；
+   * 失败仅告警，绝不影响对话主流程。
+   */
+  async prune(retentionDays: number, protectedIds: ReadonlySet<string>): Promise<number> {
+    if (!(retentionDays > 0)) return 0;
+    const cutoff = Date.now() - retentionDays * 86_400_000;
+    const removed = this.db.pruneL0Before(cutoff, protectedIds);
+    try {
+      const files = await fs.readdir(this.dir).catch(() => [] as string[]);
+      for (const name of files) {
+        const match = /^(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(name);
+        if (!match) continue;
+        const endOfDay = Date.parse(`${match[1]}T23:59:59.999Z`);
+        if (!Number.isFinite(endOfDay) || endOfDay >= cutoff) continue;
+        const file = path.join(this.dir, name);
+        const records = await readJsonl<L0MessageRecord>(file);
+        const kept = records.filter((r) => protectedIds.has(r.id));
+        if (kept.length === 0) await fs.unlink(file).catch(() => {});
+        else if (kept.length < records.length) {
+          await atomicWriteText(file, kept.map((r) => JSON.stringify(r)).join('\n') + '\n');
+        }
+      }
+    } catch (err) {
+      this.logger?.warn(`[memory] L0 JSONL 过期清理失败（检索库已独立处理）: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return removed;
+  }
+
   /** 该会话最近 n 条消息（时间升序；蒸馏背景参考用，按会话现查——ADR-0003）。 */
   async recentBySession(sessionId: string, limit: number): Promise<ConversationMessage[]> {
     return this.db.recentL0BySession(sessionId, limit);
   }
 
   /** 检索：FTS + 向量 hybrid（RRF 融合），返回按相关性排序的消息。 */
-  async search(query: string, limit: number): Promise<L0MessageRecord[]> {
+  async search(query: string, limit: number, visibleSessionIds?: readonly string[]): Promise<L0MessageRecord[]> {
     const caps = this.db.getCapabilities();
     if (!caps.ftsSearch && !caps.vectorSearch) return [];
-    const candidateK = limit * CANDIDATE_MULTIPLIER;
+    // 分支过滤必须先于 limit。当前个人库规模下用全命中候选保证不会因隐藏兄弟
+    // 占满候选池而漏掉祖先结果；SQLite 层后续可再下推动态 IN 优化。
+    const candidateK = visibleSessionIds ? Math.max(this.db.countL0(), limit) : limit * CANDIDATE_MULTIPLIER;
+    const visible = visibleSessionIds ? new Set(visibleSessionIds) : undefined;
+    const filter = (items: L0MessageRecord[]): L0MessageRecord[] =>
+      visible ? items.filter((r) => visible.has(r.sessionId)) : items;
 
-    if (caps.vectorSearch && this.helper.vectorReady()) {
+    if (this.indexEmbeddings && caps.vectorSearch && this.helper.vectorReady()) {
       const [ftsRaw, vec] = await Promise.all([
         Promise.resolve(this.db.searchL0Fts(query, candidateK)),
         this.helper.query(query),
       ]);
       const vecList = vec ? this.db.searchL0Vector(vec, candidateK) : [];
       const merged = rrfMerge([ftsRaw, vecList], (h) => h.id);
-      return merged.map(({ rrfScore: _rrf, ...r }) => r).slice(0, limit);
+      return filter(merged.map(({ rrfScore: _rrf, ...r }) => r)).slice(0, limit);
     }
-    return this.db.searchL0Fts(query, limit).map(({ score: _score, ...r }) => r);
+    return filter(this.db.searchL0Fts(query, candidateK).map(({ score: _score, ...r }) => r)).slice(0, limit);
   }
 
   /** 活切换嵌入源：同步换底层服务（嵌入源三态切换用）。 */
@@ -163,7 +198,7 @@ export class L0Store {
     onProgress?: (done: number, total: number) => void;
     shouldCancel?: () => boolean;
   }): Promise<{ written: number; failed: number; skipped: number; cancelled?: boolean }> {
-    if (!this.helper.vectorReady()) return { written: 0, failed: 0, skipped: 0 };
+    if (!this.indexEmbeddings || !this.helper.vectorReady()) return { written: 0, failed: 0, skipped: 0 };
     const items = this.db.getL0ForReindex(this.db.getVecSkipSet('l0'));
     const total = items.length;
     let done = 0;

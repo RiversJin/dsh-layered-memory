@@ -1,10 +1,3 @@
-/**
- * L0 捕获 Hook：订阅 session/event，按轮次缓冲 user/assistant 消息，
- * turn/end 时清洗并交给 Runner 落盘 + 触发蒸馏。
- *
- * 冷启动保护：插件激活时间之前的事件不捕获（防止恢复会话时倾倒全部历史）。
- */
-import { randomBytes } from 'node:crypto';
 import { blocksToText } from '../util/text.js';
 import { sanitizeText, shouldCaptureL0, stripCodeBlocks } from '../util/sanitize.js';
 /**
@@ -55,7 +48,7 @@ export class CaptureBuffers {
  * 注册 L0 捕获。返回 L0 串行链的冲刷函数（dispose 序在关库前 await，
  * 排队中的 turn 消息先落盘）；capture 关闭时返回 undefined。
  */
-export function registerCapture(ctx, cfg, runner, l0, logger, live, modes) {
+export function registerCapture(ctx, cfg, runner, l0, logger, live, modes, lineage) {
     if (!cfg.capture.enabled)
         return;
     const startFloor = Date.now();
@@ -69,6 +62,7 @@ export function registerCapture(ctx, cfg, runner, l0, logger, live, modes) {
             if (!s.enabled || !s.capture)
                 return;
             const sid = String(session.id ?? session);
+            lineage?.observe(session);
             // off 档：本会话对记忆系统完全隐身（不缓冲、不写 L0、不蒸馏）
             if (modes.get(sid) === 'off')
                 return;
@@ -85,7 +79,7 @@ export function registerCapture(ctx, cfg, runner, l0, logger, live, modes) {
             if (event.type === 'turn/end') {
                 const turn = event.data.turn;
                 const turnEvents = buffers.takeTurn(sid, turn);
-                const messages = turnEventsToMessages(turnEvents, cfg, logger);
+                const messages = turnEventsToMessages(sid, turnEvents, cfg, logger);
                 if (messages.length > 0) {
                     const roles = messages.reduce((acc, m) => {
                         acc[m.role] = (acc[m.role] ?? 0) + 1;
@@ -106,7 +100,9 @@ export function registerCapture(ctx, cfg, runner, l0, logger, live, modes) {
                         .then(() => l0.append(sid, messages))
                         .then(() => logger.info(`[memory] L0 落盘 ${n} 条`))
                         .catch((err) => logger.warn(`[memory] L0 落盘失败: ${err instanceof Error ? err.message : String(err)}`));
-                    runner.enqueue(sid, messages, mode);
+                    // undefined 仅出现在旧版直接构造配置/测试缝；保持升级前行为。Schema 新默认明确为 false。
+                    if (cfg.extract?.enabled !== false)
+                        runner.enqueue(sid, messages, mode);
                 }
             }
         }
@@ -154,7 +150,7 @@ function findTurnStart(buf, turn) {
     return -1;
 }
 /** 把轮次事件转成 L0 消息（仅真实 user 消息 + assistant 消息，清洗过滤）。 */
-function turnEventsToMessages(events, cfg, logger) {
+function turnEventsToMessages(sessionId, events, cfg, logger) {
     const out = [];
     for (const event of events) {
         if (event.type === 'user/message') {
@@ -164,18 +160,18 @@ function turnEventsToMessages(events, cfg, logger) {
                 logger.info(`[memory] L0 跳过非用户来源消息（source.kind=${msg.source?.kind ?? 'none'}）`);
                 continue;
             }
-            const content = sanitizeText(blocksToText(msg.content));
+            const content = sanitizeText(blocksToText(msg.content, cfg.capture.includeReasoning));
             if (shouldCaptureL0(content)) {
-                out.push(makeMessage('user', content, event.time, cfg.capture.maxMessageChars));
+                out.push(makeMessage(sessionId, event.seq, 'user', content, event.time, cfg.capture.maxMessageChars));
             }
         }
         else if (event.type === 'assistant/message') {
             const data = event.data;
-            let content = sanitizeText(blocksToText(data.message?.content));
+            let content = sanitizeText(blocksToText(data.message?.content, cfg.capture.includeReasoning));
             if (cfg.capture.stripCodeBlocks)
                 content = stripCodeBlocks(content);
             if (shouldCaptureL0(content)) {
-                out.push(makeMessage('assistant', content, event.time, cfg.capture.maxMessageChars));
+                out.push(makeMessage(sessionId, event.seq, 'assistant', content, event.time, cfg.capture.maxMessageChars));
             }
         }
     }
@@ -184,9 +180,10 @@ function turnEventsToMessages(events, cfg, logger) {
     }
     return out;
 }
-function makeMessage(role, content, timestamp, maxChars) {
+function makeMessage(sessionId, seq, role, content, timestamp, maxChars) {
     return {
-        id: `msg_${Date.now()}_${randomBytes(3).toString('hex')}`,
+        // fork 的 seed 事件不会重新发布；session+seq 因而稳定、幂等，并可在工具执行时预先引用。
+        id: `l0:${sessionId}:${seq}`,
         role,
         content: content.slice(0, maxChars),
         timestamp,

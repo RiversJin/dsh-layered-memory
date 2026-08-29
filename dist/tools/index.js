@@ -1,8 +1,10 @@
+import { randomBytes } from 'node:crypto';
 import { defineTool } from '@deepseek-ai/dsh-tools';
+import { familyForType } from '../types.js';
 const OFF_NOTICE = '本会话的记忆档位为"关闭"：该会话对记忆系统完全隐身，不读取也不写入记忆。';
 const WRITE_ONLY_NOTICE = '本会话为只写模式：记忆照常沉淀，但不读取。';
 const GLOBAL_OFF_NOTICE = '记忆注入已全局停用：本会话不读取记忆（沉淀照常）。';
-export function registerMemoryTools(ctx, cfg, stores, logger, modes, live) {
+export function registerMemoryTools(ctx, cfg, stores, logger, modes, live, lineage) {
     if (!cfg.tools)
         return;
     /**
@@ -27,6 +29,98 @@ export function registerMemoryTools(ctx, cfg, stores, logger, modes, live) {
             return null;
         return mode === 'auto' ? undefined : mode;
     };
+    const visibleSessions = (agentId) => agentId === undefined ? undefined : (lineage?.ancestors(agentId) ?? [agentId]);
+    // ── memory_commit: 模型显式写入一条已整理的 L1 原子记忆 ──
+    ctx.tools.register(defineTool({
+        name: 'memory_commit',
+        description: '显式保存一条值得跨轮次保留的原子记忆。仅在信息稳定、未来有用且用户允许保留时调用；不要保存临时闲聊、工具输出、秘密或模型推理。若要修订旧记忆，先 memory_search 获取 id，再传 replaces。',
+        parameters: {
+            content: { type: 'string', required: true, description: '自包含、可独立理解的一条事实或规则' },
+            type: { type: 'string', required: true, description: 'persona/episodic/instruction/work_fact/work_task/work_method/work_artifact' },
+            priority: { type: 'number', description: '0-100，默认 60' },
+            scope: { type: 'string', description: 'auto（默认）/global/branch；global 跨分支，branch 仅当前分支及其后代' },
+            replaces: { type: 'string', description: '要被本条修订替换的旧 memory id；须先搜索确认' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                properties: {
+                    status: { type: 'string' },
+                    id: { type: 'string' },
+                    scope: { type: 'string' },
+                    notice: { type: 'string' },
+                },
+                additionalProperties: false,
+            },
+            render: (_args, value) => [{ type: 'text', text: value.notice ?? `记忆已保存（${value.id ?? ''}，${value.scope ?? ''}）` }],
+        },
+        execute: async (args, exec) => {
+            const sid = exec.agent?.id;
+            if (!sid)
+                return { status: 'rejected', id: '', scope: '', notice: '缺少会话标识，未写入记忆。' };
+            if (modes.get(sid) === 'off')
+                return { status: 'rejected', id: '', scope: '', notice: OFF_NOTICE };
+            const content = args.content.trim();
+            if (!content)
+                return { status: 'rejected', id: '', scope: '', notice: '记忆内容为空，未写入。' };
+            const type = args.type.trim() || 'episodic';
+            const family = familyForType(type);
+            const rawScope = args.scope?.trim();
+            const scope = rawScope === 'global' || rawScope === 'branch'
+                ? rawScope
+                : (lineage?.isFork(sid) || (type !== 'persona' && type !== 'instruction') ? 'branch' : 'global');
+            const visible = lineage?.ancestors(sid) ?? [sid];
+            // 精确语义重复幂等（忽略空白与大小写）；相似但不同的内容不擅自合并。
+            const candidates = await stores.l1.searchCandidates(content, Math.max(stores.l1.size, 20), family, visible);
+            const norm = (s) => s.replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+            const duplicate = candidates.find((r) => r.type === type && (r.scope ?? 'global') === scope && norm(r.content) === norm(content));
+            if (duplicate) {
+                return { status: 'duplicate', id: duplicate.id, scope, notice: `已有相同记忆（${duplicate.id}），未重复写入。` };
+            }
+            let replaced;
+            if (args.replaces?.trim()) {
+                const target = stores.l1.getByIds([args.replaces.trim()])[0];
+                if (!target || !((target.scope ?? 'global') === 'global' || visible.includes(target.sessionId ?? 'default'))) {
+                    return { status: 'rejected', id: '', scope, notice: '指定的旧记忆不存在或当前分支不可见，未写入。' };
+                }
+                if ((target.family ?? familyForType(target.type)) !== family) {
+                    return { status: 'rejected', id: '', scope, notice: '新旧记忆分属不同记忆族，未执行替换。' };
+                }
+                const targetScope = target.scope ?? 'global';
+                if (targetScope !== scope) {
+                    return { status: 'rejected', id: '', scope, notice: '新旧记忆可见域不同，未执行替换。' };
+                }
+                if (targetScope === 'branch' && (target.sessionId ?? 'default') !== sid) {
+                    return { status: 'rejected', id: '', scope, notice: '祖先分支记忆在子分支中只读；请另存当前分支的新记忆。' };
+                }
+                replaced = target;
+            }
+            const now = Date.now();
+            const record = {
+                id: `mem_${now}_${randomBytes(3).toString('hex')}`,
+                content,
+                type,
+                priority: Math.min(100, Math.max(0, Math.round(args.priority ?? 60))),
+                scene_name: 'explicit-commit',
+                timestamps: [now],
+                createdAt: now,
+                updatedAt: now,
+                version: (replaced?.version ?? -1) + 1,
+                source_message_ids: currentTurnSourceIds(exec.agent.session.events, sid),
+                metadata: { committed_by: 'memory_commit' },
+                sessionId: sid,
+                scope,
+                family,
+            };
+            await stores.l1.appendNew([record]);
+            if (replaced)
+                await stores.l1.deleteBatch([replaced.id]);
+            logger.info(`[memory] 显式提交 L1 id=${record.id} type=${type} scope=${scope} session=${sid}${replaced ? ` replaces=${replaced.id}` : ''}`);
+            return replaced
+                ? { status: 'replaced', id: record.id, scope, notice: `记忆已修订（${record.id}）。` }
+                : { status: 'stored', id: record.id, scope };
+        },
+    }));
     /** 拒读时的归因文案（familyOfCaller 判 null 后重查内存 Map，成本可忽略）：
      *  off 完全隐身 / 会话只写覆盖 / 全局召回关——三种停用各说各话，不谎报只写。 */
     const blockNoticeOf = (agentId) => {
@@ -59,6 +153,7 @@ export function registerMemoryTools(ctx, cfg, stores, logger, modes, live) {
                             type: 'object',
                             properties: {
                                 content: { type: 'string' },
+                                id: { type: 'string' },
                                 type: { type: 'string' },
                                 scene_name: { type: 'string' },
                                 score: { type: 'number' },
@@ -79,9 +174,14 @@ export function registerMemoryTools(ctx, cfg, stores, logger, modes, live) {
             if (family === null)
                 return { items: [], notice: blockNoticeOf(exec.agent?.id) };
             const limit = Math.min(Math.max(args.limit ?? 5, 1), 20);
-            const hits = await stores.l1.search(args.query, limit, { type: args.type || undefined, family: family ?? undefined });
+            const hits = await stores.l1.search(args.query, limit, {
+                type: args.type || undefined,
+                family: family ?? undefined,
+                visibleSessionIds: visibleSessions(exec.agent?.id),
+            });
             return {
                 items: hits.map((h) => ({
+                    id: h.id,
                     content: h.content,
                     type: h.type,
                     scene_name: h.scene_name,
@@ -127,7 +227,7 @@ export function registerMemoryTools(ctx, cfg, stores, logger, modes, live) {
             if (familyOfCaller(exec.agent?.id) === null)
                 return { items: [], notice: blockNoticeOf(exec.agent?.id) };
             const limit = Math.min(Math.max(args.limit ?? 5, 1), 20);
-            const records = await stores.l0.search(args.query, limit);
+            const records = await stores.l0.search(args.query, limit, visibleSessions(exec.agent?.id));
             return {
                 items: records.map((r) => ({
                     session_id: r.sessionId,
@@ -178,13 +278,31 @@ export function registerMemoryTools(ctx, cfg, stores, logger, modes, live) {
             return { content: content ?? '' };
         },
     }));
-    logger.info('[memory] 工具已注册: memory_search / conversation_search / memory_read_scene');
+    logger.info('[memory] 工具已注册: memory_commit / memory_search / conversation_search / memory_read_scene');
+}
+/** 工具执行发生在 turn/end 前；确定性 L0 id 可提前引用当前轮真实 user 消息。 */
+function currentTurnSourceIds(events, sessionId) {
+    let start = -1;
+    for (let i = events.length - 1; i >= 0; i--) {
+        if (events[i].type === 'turn/start') {
+            start = i;
+            break;
+        }
+    }
+    return events.slice(start + 1)
+        .filter((e) => {
+        if (e.type !== 'user/message')
+            return false;
+        const data = e.data;
+        return data?.source?.kind === 'user';
+    })
+        .map((e) => `l0:${sessionId}:${e.seq}`);
 }
 function renderMemoryItems(items) {
     if (!items || items.length === 0)
         return '（没有找到相关记忆）';
     return items
-        .map((it, i) => `${i + 1}. [${it.type ?? ''}]${it.scene_name ? ` (${it.scene_name})` : ''} ${it.content ?? ''}`)
+        .map((it, i) => `${i + 1}. [${it.type ?? ''}]${it.scene_name ? ` (${it.scene_name})` : ''}${it.id ? ` id=${it.id}` : ''} ${it.content ?? ''}`)
         .join('\n');
 }
 function renderConversationItems(items) {

@@ -2,8 +2,8 @@
  * 文本工具：ContentBlock → 纯文本；FTS / BM25 共用分词。
  */
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
-/** 把消息的 ContentBlock[] 展平成纯文本（仅 text 块）。 */
-export declare function blocksToText(blocks: readonly ContentBlock[] | undefined): string;
+/** 把消息的 ContentBlock[] 展平成纯文本；reasoning 仅在显式启用时进入结果。 */
+export declare function blocksToText(blocks: readonly ContentBlock[] | undefined, includeReasoning?: boolean): string;
 /**
  * 中英混排分词：jieba 词元 ∪ 拉丁词 ∪ CJK 二元组，按首次出现顺序去重。
  *

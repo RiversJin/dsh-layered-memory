@@ -60,6 +60,21 @@ export class SessionModeStore {
     get(sessionId) {
         return this.entries.get(sessionId)?.mode ?? this.loaded;
     }
+    has(sessionId) {
+        return this.entries.has(sessionId);
+    }
+    /** fork 子会话继承父会话的档位与只写覆盖；已有显式子配置不覆盖。 */
+    inherit(childSessionId, parentSessionId) {
+        if (this.entries.has(childSessionId))
+            return;
+        const parent = this.entries.get(parentSessionId);
+        this.entries.set(childSessionId, {
+            mode: parent?.mode ?? this.loaded,
+            recall: parent?.recall,
+            updatedAt: Date.now(),
+        });
+        this.writeChain = this.writeChain.then(() => this.persist());
+    }
     /** 会话级注入覆盖原始值（#38）：undefined = 未覆盖，跟随全局。 */
     getRecall(sessionId) {
         return this.entries.get(sessionId)?.recall;

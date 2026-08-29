@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { type MemoryConfig } from './config.js';
 export declare const name = "dsh-memory-plugin";
-/** 硬依赖：蒸馏要用 llm，工具注册要用 tools，召回注入要用 systemPrompt。 */
+/** 硬依赖：蒸馏用 llm，工具用 tools，召回用 systemPrompt，fork 谱系用 sessions。 */
 export declare const inject: string[];
 /**
  * 插件配置 schema。导出名必须是 `Config`——cordis 运行时只读 plugin.Config
@@ -15,10 +15,16 @@ export declare const Config: import("@deepseek-ai/schemastery").default<Schemast
         enabled: import("@deepseek-ai/schemastery").default<boolean, boolean>;
         stripCodeBlocks: import("@deepseek-ai/schemastery").default<boolean, boolean>;
         maxMessageChars: import("@deepseek-ai/schemastery").default<number, number>;
+        includeReasoning: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        indexEmbeddings: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        retentionDays: import("@deepseek-ai/schemastery").default<number, number>;
     }>, Schemastery.ObjectT<{
         enabled: import("@deepseek-ai/schemastery").default<boolean, boolean>;
         stripCodeBlocks: import("@deepseek-ai/schemastery").default<boolean, boolean>;
         maxMessageChars: import("@deepseek-ai/schemastery").default<number, number>;
+        includeReasoning: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        indexEmbeddings: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        retentionDays: import("@deepseek-ai/schemastery").default<number, number>;
     }>>;
     extract: import("@deepseek-ai/schemastery").default<Schemastery.ObjectS<{
         enabled: import("@deepseek-ai/schemastery").default<boolean, boolean>;
@@ -260,10 +266,16 @@ export declare const Config: import("@deepseek-ai/schemastery").default<Schemast
         enabled: import("@deepseek-ai/schemastery").default<boolean, boolean>;
         stripCodeBlocks: import("@deepseek-ai/schemastery").default<boolean, boolean>;
         maxMessageChars: import("@deepseek-ai/schemastery").default<number, number>;
+        includeReasoning: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        indexEmbeddings: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        retentionDays: import("@deepseek-ai/schemastery").default<number, number>;
     }>, Schemastery.ObjectT<{
         enabled: import("@deepseek-ai/schemastery").default<boolean, boolean>;
         stripCodeBlocks: import("@deepseek-ai/schemastery").default<boolean, boolean>;
         maxMessageChars: import("@deepseek-ai/schemastery").default<number, number>;
+        includeReasoning: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        indexEmbeddings: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        retentionDays: import("@deepseek-ai/schemastery").default<number, number>;
     }>>;
     extract: import("@deepseek-ai/schemastery").default<Schemastery.ObjectS<{
         enabled: import("@deepseek-ai/schemastery").default<boolean, boolean>;

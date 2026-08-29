@@ -1,8 +1,15 @@
+/**
+ * L0 捕获 Hook：订阅 session/event，按轮次缓冲 user/assistant 消息，
+ * turn/end 时清洗并交给 Runner 落盘 + 触发蒸馏。
+ *
+ * 冷启动保护：插件激活时间之前的事件不捕获（防止恢复会话时倾倒全部历史）。
+ */
 import type { Context } from '@deepseek-ai/cordis';
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
 import type { MemoryConfig } from '../config.js';
 import type { MemoryRunner } from '../pipeline/runner.js';
 import type { SessionModeStore } from '../store/session-modes.js';
+import type { SessionLineageStore } from '../store/session-lineage.js';
 import type { L0Store } from '../store/l0.js';
 import type { LiveSettingsHandle } from '../settings.js';
 import type { MemoryLogger } from '../types.js';
@@ -23,7 +30,7 @@ export declare class CaptureBuffers {
  * 注册 L0 捕获。返回 L0 串行链的冲刷函数（dispose 序在关库前 await，
  * 排队中的 turn 消息先落盘）；capture 关闭时返回 undefined。
  */
-export declare function registerCapture(ctx: Context, cfg: MemoryConfig, runner: MemoryRunner, l0: L0Store, logger: MemoryLogger, live: LiveSettingsHandle, modes: SessionModeStore): (() => Promise<void>) | undefined;
+export declare function registerCapture(ctx: Context, cfg: MemoryConfig, runner: MemoryRunner, l0: L0Store, logger: MemoryLogger, live: LiveSettingsHandle, modes: SessionModeStore, lineage?: SessionLineageStore): (() => Promise<void>) | undefined;
 /**
  * 缓冲上限裁剪（防御性；RELEVANT_TYPES 过滤后基本不可达）。
  * 铁律：进行中轮次（turn/start 之后、turn/end 之前）的事件绝不裁——

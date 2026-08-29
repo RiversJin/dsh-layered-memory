@@ -164,6 +164,8 @@ export declare class MemoryDb {
     /** 按时间桶 + model 聚合（委托 cost-ledger；趋势图与日均/周均/月均共用）。 */
     aggregateByBucket(bucketMs: number, offsetMs: number, since: number, layer: string): BucketRow[];
     countL0(): number;
+    /** 清理过期 L0；被显式 L1 证据引用的 id 由调用方保护。 */
+    pruneL0Before(timestamp: number, protectedIds: ReadonlySet<string>): number;
     /** 统计 recorded_at >= iso 的消息数（状态面板"今日捕获"用）。 */
     countL0Since(iso: string): number;
     /** 统计某会话已捕获消息数（session-stats 数据源；idx_l0_session_id 索引点查）。 */

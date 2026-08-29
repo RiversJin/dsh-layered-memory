@@ -4,13 +4,13 @@
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import { jiebaCut } from './tokenizer.js';
 
-/** 把消息的 ContentBlock[] 展平成纯文本（仅 text 块）。 */
-export function blocksToText(blocks: readonly ContentBlock[] | undefined): string {
+/** 把消息的 ContentBlock[] 展平成纯文本；reasoning 仅在显式启用时进入结果。 */
+export function blocksToText(blocks: readonly ContentBlock[] | undefined, includeReasoning = false): string {
   if (!blocks) return '';
   const parts: string[] = [];
   for (const b of blocks) {
     if (b.type === 'text') parts.push((b as { text: string }).text);
-    else if (b.type === 'reasoning') parts.push((b as { text: string }).text);
+    else if (includeReasoning && b.type === 'reasoning') parts.push((b as { text: string }).text);
   }
   return parts.join('\n');
 }
@@ -65,4 +65,3 @@ export function tokenize(text: string): string[] {
   for (const bg of cjkBigrams(lower)) push(bg);
   return tokens;
 }
-

@@ -1,13 +1,13 @@
 import { jiebaCut } from './tokenizer.js';
-/** 把消息的 ContentBlock[] 展平成纯文本（仅 text 块）。 */
-export function blocksToText(blocks) {
+/** 把消息的 ContentBlock[] 展平成纯文本；reasoning 仅在显式启用时进入结果。 */
+export function blocksToText(blocks, includeReasoning = false) {
     if (!blocks)
         return '';
     const parts = [];
     for (const b of blocks) {
         if (b.type === 'text')
             parts.push(b.text);
-        else if (b.type === 'reasoning')
+        else if (includeReasoning && b.type === 'reasoning')
             parts.push(b.text);
     }
     return parts.join('\n');

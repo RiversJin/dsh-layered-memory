@@ -48,6 +48,7 @@ import { PersonaStore } from './store/persona.js';
 import { RuntimeInstaller, type SpawnImpl } from './store/runtime-installer.js';
 import { SceneStore, sanitizeFilename } from './store/scenes.js';
 import { SessionModeStore } from './store/session-modes.js';
+import { SessionLineageStore } from './store/session-lineage.js';
 import { MemoryDb } from './store/sqlite.js';
 import { bm25RankToScore, buildFtsQuery, rrfMerge, tokenizeForFts, applyDecayWeight, DECAY_FLOOR } from './store/search-utils.js';
 import { liveSettingsSchema, projectDistillChain, registerLiveSettings, validateDistillChain, type LiveSettingsHandle, type MemoryLiveSettings } from './settings.js';
@@ -530,6 +531,14 @@ async function main(): Promise<void> {
     { type: 'text', text: ' world' },
   ] as never);
   assert(text === 'hello\n world', `blocksToText (${JSON.stringify(text)})`);
+  assert(
+    blocksToText([{ type: 'reasoning', text: '内部推理' }, { type: 'text', text: '正文' }] as never) === '正文',
+    'blocksToText 默认排除 reasoning',
+  );
+  assert(
+    blocksToText([{ type: 'reasoning', text: '内部推理' }, { type: 'text', text: '正文' }] as never, true) === '内部推理\n正文',
+    'blocksToText 可显式包含 reasoning（兼容开关）',
+  );
 
   console.log('== 10. RPC 端点分发（记忆浏览器数据通道） ==');
   {
@@ -948,7 +957,7 @@ async function main(): Promise<void> {
       } as never;
       const toolGlobalRecall = { value: true };
       registerMemoryTools(ctxT, { tools: true } as never, { l0: l0T, l1: l1T, scenes: scenesT, persona: personaT }, silentLogger, modesT, { supported: true, get: () => ({ recall: toolGlobalRecall.value }) } as never);
-      assert(Object.keys(specs).length === 3, '三工具注册');
+      assert(Object.keys(specs).length === 4 && !!specs['memory_commit'], '四工具注册（含显式 memory_commit）');
 
       const ms = await specs['memory_search'].execute({ query: 'emoji' }, { agent: { id: 'sess-off' } });
       assert((ms.items as unknown[]).length === 0 && typeof ms.notice === 'string' && (ms.notice as string).includes('隐身'), `off 档 memory_search 返回统一提示（非空结果集）`);
@@ -3999,6 +4008,100 @@ async function main(): Promise<void> {
       }
     } finally {
       await fs.rm(tmp33, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  console.log('== 34. fork 谱系 / 分支隔离 / 显式记忆提交 / L0 保留 ==');
+  {
+    const tmp34 = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-mem-lineage-'));
+    try {
+      const lineage = new SessionLineageStore(tmp34, silentLogger);
+      await lineage.init();
+      const fakeSession = (id: string, parent?: string, seedLength?: number) => ({
+        id,
+        header: { id, version: 0, createdAt: Date.now(), parentSession: parent, seedLength },
+      });
+      lineage.observe(fakeSession('root') as never);
+      lineage.observe(fakeSession('child-a', 'root', 12) as never);
+      lineage.observe(fakeSession('grandchild-a', 'child-a', 24) as never);
+      lineage.observe(fakeSession('child-b', 'root', 12) as never);
+      assert(lineage.ancestors('grandchild-a').join('>') === 'grandchild-a>child-a>root', '祖先链按当前→根排列');
+      assert(!lineage.ancestors('child-a').includes('child-b'), '兄弟分支不可见');
+
+      const modes = new SessionModeStore(tmp34, 'auto', silentLogger);
+      await modes.init();
+      modes.set('root', 'off');
+      modes.setRecall('root', false);
+      modes.inherit('child-a', 'root');
+      assert(modes.get('child-a') === 'off' && modes.getRecall('child-a') === false, 'fork 继承父会话档位与只写覆盖');
+
+      const db = new MemoryDb(path.join(tmp34, 'memory.db'), 0, silentLogger);
+      db.init();
+      const l0 = new L0Store(tmp34, db, undefined, silentLogger, false);
+      const l1 = new L1Store(tmp34, db, undefined, 'keyword', silentLogger);
+      await Promise.all([l0.init(), l1.init()]);
+      const now = Date.now();
+      await l0.append('root', [{ id: 'l0-root', role: 'user', content: '谱系测试共同关键词 根记录', timestamp: now }]);
+      await l0.append('child-a', [{ id: 'l0-a', role: 'user', content: '谱系测试共同关键词 A记录', timestamp: now + 1 }]);
+      await l0.append('child-b', [{ id: 'l0-b', role: 'user', content: '谱系测试共同关键词 B记录', timestamp: now + 2 }]);
+      const l0Visible = await l0.search('谱系测试共同关键词', 10, lineage.ancestors('child-a'));
+      assert(l0Visible.some((r) => r.id === 'l0-root') && l0Visible.some((r) => r.id === 'l0-a'), 'L0 当前分支可见自身与祖先');
+      assert(!l0Visible.some((r) => r.id === 'l0-b'), 'L0 严格隔离兄弟分支');
+
+      const rec = (id: string, sessionId: string, scope: 'global' | 'branch', content: string) => ({
+        id, sessionId, scope, content, type: 'instruction', priority: 60, scene_name: 'test',
+        timestamps: [now], createdAt: now, updatedAt: now,
+      });
+      await l1.appendNew([
+        rec('l1-global', 'elsewhere', 'global', '谱系结构化关键词 全局'),
+        rec('l1-root', 'root', 'branch', '谱系结构化关键词 根'),
+        rec('l1-a', 'child-a', 'branch', '谱系结构化关键词 A'),
+        rec('l1-b', 'child-b', 'branch', '谱系结构化关键词 B'),
+      ]);
+      const l1Visible = await l1.search('谱系结构化关键词', 10, { visibleSessionIds: lineage.ancestors('child-a') });
+      assert(l1Visible.some((r) => r.id === 'l1-global') && l1Visible.some((r) => r.id === 'l1-root') && l1Visible.some((r) => r.id === 'l1-a'), 'L1 global + 当前分支祖先可见');
+      assert(!l1Visible.some((r) => r.id === 'l1-b'), 'L1 branch 隔离兄弟分支');
+
+      const specs: Record<string, unknown> = {};
+      const toolCtx = { tools: { register: (spec: { name: string }) => { specs[spec.name] = spec; return () => {}; } } } as never;
+      const scenes = { chat: new SceneStore(tmp34, 'chat', silentLogger), work: new SceneStore(tmp34, 'work', silentLogger) };
+      const personas = { chat: new PersonaStore(tmp34, 'chat'), work: new PersonaStore(tmp34, 'work') };
+      await Promise.all([scenes.chat.init(), scenes.work.init(), personas.chat.init(), personas.work.init()]);
+      modes.set('child-a', 'auto');
+      registerMemoryTools(toolCtx, { tools: true } as never, { l0, l1, scenes, persona: personas }, silentLogger, modes, { supported: true, get: () => ({ recall: true }) } as never, lineage);
+      const commit = specs.memory_commit as {
+        execute(args: Record<string, unknown>, exec: { agent: { id: string; session: { events: SessionEvent[] } } }): Promise<{ status: string; id: string; scope: string }>;
+      };
+      const agentExec = { agent: { id: 'child-a', session: { events: [
+        { type: 'turn/start', seq: 30, time: now, data: { turn: 2 } },
+        { type: 'user/message', seq: 31, time: now + 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '请记住' }] } },
+      ] as never } } };
+      const committed = await commit.execute(
+        { content: '用户希望长期使用显式记忆提交', type: 'instruction', priority: 90, scope: 'branch' },
+        agentExec,
+      );
+      const saved = l1.getByIds([committed.id])[0];
+      assert(committed.status === 'stored' && saved.scope === 'branch' && saved.sessionId === 'child-a', 'memory_commit 显式写入 branch L1');
+      assert(saved.source_message_ids?.[0] === 'l0:child-a:31', 'memory_commit 自动绑定当前轮确定性 L0 证据');
+      const duplicate = await commit.execute(
+        { content: '用户希望长期使用显式记忆提交', type: 'instruction', priority: 90, scope: 'branch' },
+        agentExec,
+      );
+      assert(duplicate.status === 'duplicate' && duplicate.id === committed.id, 'memory_commit 精确重复幂等');
+
+      const old = now - 100 * 86_400_000;
+      await l0.append('child-a', [
+        { id: 'old-protected', role: 'user', content: '过期证据保护关键词', timestamp: old },
+        { id: 'old-expired', role: 'user', content: '过期普通清理关键词', timestamp: old + 1 },
+      ]);
+      await l1.appendNew([{ ...rec('protect-ref', 'child-a', 'branch', '保护旧证据'), source_message_ids: ['old-protected'] }]);
+      await l0.prune(90, l1.referencedMessageIds());
+      assert((await l0.search('过期证据保护关键词', 5, ['child-a'])).some((r) => r.id === 'old-protected'), 'L1 引用的过期 L0 证据保留');
+      assert(!(await l0.search('过期普通清理关键词', 5, ['child-a'])).some((r) => r.id === 'old-expired'), '未引用过期 L0 从检索库清理');
+      db.close();
+      await Promise.all([lineage.flush(), modes.flush()]);
+    } finally {
+      await fs.rm(tmp34, { recursive: true, force: true }).catch(() => {});
     }
   }
 

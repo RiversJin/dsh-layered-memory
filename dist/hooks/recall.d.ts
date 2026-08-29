@@ -22,6 +22,7 @@ import type { L1Store } from '../store/l1.js';
 import type { PersonaStore } from '../store/persona.js';
 import type { SceneStore } from '../store/scenes.js';
 import type { SessionModeStore } from '../store/session-modes.js';
+import type { SessionLineageStore } from '../store/session-lineage.js';
 import type { MemoryLogger } from '../types.js';
 import { type OccupancyLedger } from '../util/context-occupancy.js';
 /**
@@ -60,4 +61,4 @@ export declare function registerRecall(ctx: Context, cfg: MemoryConfig, stores: 
     l1: L1Store;
     scenes: Record<'chat' | 'work', SceneStore>;
     persona: Record<'chat' | 'work', PersonaStore>;
-}, logger: MemoryLogger, live: LiveSettingsHandle, modes: SessionModeStore, dataDir: string): RecallHooks;
+}, logger: MemoryLogger, live: LiveSettingsHandle, modes: SessionModeStore, dataDir: string, lineage?: SessionLineageStore): RecallHooks;
