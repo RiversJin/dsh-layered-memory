@@ -46,6 +46,26 @@ export interface L0MessageRecord {
     content: string;
     timestamp: number;
 }
+/** 压缩归档索引：梗概用于低成本召回，messageIds 指向 L0 原始消息。 */
+export interface ArchiveSegmentRecord {
+    id: string;
+    sessionId: string;
+    bucketStart: number;
+    latestAt: number;
+    summary: string;
+    /** 仅供梗概失败后重试；模型读取细节始终走 messageIds → L0。 */
+    sourceText: string;
+    messageIds: string[];
+    status: 'pending' | 'ready';
+    /** 摘要提示词/截断规则版本；旧版本会在下次启动后台重建。 */
+    summaryVersion: number;
+    createdAt: number;
+    updatedAt: number;
+}
+/** 压缩归档梗概的全文检索命中。 */
+export interface ArchiveSearchHit extends ArchiveSegmentRecord {
+    score: number;
+}
 /** L1 抽取产出（LLM 返回的记忆条目，尚未分配 record id）。 */
 export interface ExtractedMemory {
     content: string;

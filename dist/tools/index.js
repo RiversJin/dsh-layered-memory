@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { familyForType } from '../types.js';
+import { tokenizeForSearch } from '../store/search-utils.js';
 const OFF_NOTICE = '本会话的记忆档位为"关闭"：该会话对记忆系统完全隐身，不读取也不写入记忆。';
 const WRITE_ONLY_NOTICE = '本会话为只写模式：记忆照常沉淀，但不读取。';
 const GLOBAL_OFF_NOTICE = '记忆注入已全局停用：本会话不读取记忆（沉淀照常）。';
@@ -206,10 +207,12 @@ export function registerMemoryTools(ctx, cfg, stores, logger, modes, live, linea
     // ── conversation_search: L0 原始对话 ──
     ctx.tools.register(defineTool({
         name: 'conversation_search',
-        description: '搜索原始对话历史（L0），返回带时间戳的消息，适合具体原话、时间线与上下文细节；结构化偏好、事实、任务或规则优先用 memory_search。两种搜索每轮合计最多调用 3 次；仍无结果时直接按已有信息回答。',
+        description: '搜索当前会话的原始历史（L0）和压缩档案梗概，返回带时间戳的消息。先按 query 找档案；自动召回给出 archive id 后可传 archive_id 读取对应原文。适合具体原话、时间线与上下文细节；结构化偏好、事实、任务或规则优先用 memory_search。两种搜索每轮合计最多调用 3 次；仍无结果时直接按已有信息回答。',
         parameters: {
             query: { type: 'string', required: true, description: '搜索查询文本' },
             limit: { type: 'number', description: '最大返回条数（默认 5）' },
+            archive_id: { type: 'string', description: '可选：自动召回或搜索结果给出的档案 id；传入后读取该段原始消息' },
+            offset: { type: 'number', description: '读取档案原文时的消息偏移量（默认 0）' },
         },
         output: {
             schema: {
@@ -220,10 +223,23 @@ export function registerMemoryTools(ctx, cfg, stores, logger, modes, live, linea
                         items: {
                             type: 'object',
                             properties: {
-                                session_id: { type: 'string' },
                                 role: { type: 'string' },
                                 content: { type: 'string' },
                                 timestamp: { type: 'number' },
+                            },
+                            additionalProperties: false,
+                        },
+                    },
+                    archives: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                id: { type: 'string' },
+                                summary: { type: 'string' },
+                                start_at: { type: 'number' },
+                                end_at: { type: 'number' },
+                                message_count: { type: 'number' },
                             },
                             additionalProperties: false,
                         },
@@ -233,20 +249,59 @@ export function registerMemoryTools(ctx, cfg, stores, logger, modes, live, linea
                 additionalProperties: false,
             },
             render: (_args, value) => [
-                { type: 'text', text: value.notice ?? renderConversationItems(value.items ?? []) },
+                {
+                    type: 'text',
+                    text: value.notice ?? [
+                        renderArchiveItems(value.archives ?? []),
+                        renderConversationItems(value.items ?? []),
+                    ].filter(Boolean).join('\n\n'),
+                },
             ],
         },
         execute: async (args, exec) => {
             if (familyOfCaller(exec.agent?.id) === null)
-                return { items: [], notice: blockNoticeOf(exec.agent?.id) };
+                return { items: [], archives: [], notice: blockNoticeOf(exec.agent?.id) };
             const limit = Math.min(Math.max(args.limit ?? 5, 1), 20);
-            const records = await stores.l0.search(args.query, limit, visibleSessions(exec.agent?.id));
+            const visible = visibleSessions(exec.agent?.id);
+            const archiveId = args.archive_id?.trim();
+            let records;
+            let archiveHits;
+            if (archiveId) {
+                const archive = stores.archive.get(archiveId);
+                if (!archive || (visible && !visible.includes(archive.sessionId))) {
+                    return { items: [], archives: [], notice: '指定的压缩档案不存在或不属于当前分支。' };
+                }
+                const queryTokens = new Set(tokenizeForSearch(args.query));
+                const offset = Math.max(0, Math.floor(args.offset ?? 0));
+                records = stores.archive.messages(archiveId)
+                    .map((record, index) => ({
+                    record,
+                    index,
+                    score: tokenizeForSearch(record.content).reduce((n, token) => n + (queryTokens.has(token) ? 1 : 0), 0),
+                }))
+                    .sort((a, b) => b.score - a.score || a.index - b.index)
+                    .slice(offset, offset + limit)
+                    .map(({ record }) => record);
+                archiveHits = [archive];
+            }
+            else {
+                [records, archiveHits] = await Promise.all([
+                    stores.l0.search(args.query, limit, visible),
+                    Promise.resolve(stores.archive.search(args.query, Math.min(limit, 5), visible)),
+                ]);
+            }
             return {
                 items: records.map((r) => ({
-                    session_id: r.sessionId,
                     role: r.role,
                     content: r.content,
                     timestamp: r.timestamp,
+                })),
+                archives: archiveHits.map((archive) => ({
+                    id: archive.id,
+                    summary: archive.summary,
+                    start_at: archive.bucketStart,
+                    end_at: archive.latestAt,
+                    message_count: archive.messageIds.length,
                 })),
             };
         },
@@ -324,7 +379,16 @@ function renderConversationItems(items) {
     return items
         .map((it, i) => {
         const time = it.timestamp ? new Date(it.timestamp).toISOString() : '';
-        return `${i + 1}. [${it.role ?? ''}]${time ? ` ${time}` : ''} (session=${it.session_id ?? ''})\n${it.content ?? ''}`;
+        return `${i + 1}. [${it.role ?? ''}]${time ? ` ${time}` : ''}\n${it.content ?? ''}`;
     })
         .join('\n\n');
+}
+function renderArchiveItems(items) {
+    if (!items || items.length === 0)
+        return '';
+    return items.map((item, index) => {
+        const start = item.start_at ? new Date(item.start_at).toISOString() : '';
+        const end = item.end_at ? new Date(item.end_at).toISOString() : '';
+        return `${index + 1}. [压缩档案] id=${item.id ?? ''} ${start}..${end} (${item.message_count ?? 0} 条)\n${item.summary ?? ''}`;
+    }).join('\n\n');
 }

@@ -23,6 +23,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { MemoryConfig } from '../config.js';
 import type { LiveSettingsHandle } from '../settings.js';
 import type { L1Store } from '../store/l1.js';
+import type { ArchiveStore } from '../store/archive.js';
 import type { PersonaStore } from '../store/persona.js';
 import { RecallDedupeStore } from '../store/recall-dedupe.js';
 import { OccupancyStore } from '../store/occupancy.js';
@@ -169,7 +170,7 @@ export interface RecallHooks {
 export function registerRecall(
   ctx: Context,
   cfg: MemoryConfig,
-  stores: { l1: L1Store; scenes: Record<'chat' | 'work', SceneStore>; persona: Record<'chat' | 'work', PersonaStore> },
+  stores: { archive?: ArchiveStore; l1: L1Store; scenes: Record<'chat' | 'work', SceneStore>; persona: Record<'chat' | 'work', PersonaStore> },
   logger: MemoryLogger,
   live: LiveSettingsHandle,
   modes: SessionModeStore,
@@ -313,15 +314,32 @@ export function registerRecall(
           st.lastHits = 0;
           st.updatedAt = Date.now();
           const searchStart = Date.now();
+          const visibleSessionIds = lineage?.ancestors(payload.agent.id) ?? [payload.agent.id];
+          const resultLimit = Math.min(cfg.recall.maxResults, AUTO_RECALL_MAX_RESULTS);
           const hits = await raceRecallTimeout(
-            stores.l1.search(query, Math.min(cfg.recall.maxResults, AUTO_RECALL_MAX_RESULTS), {
-              scoreThreshold: cfg.recall.scoreThreshold,
-              strictThreshold: true,
-              family: mode === 'auto' ? undefined : mode,
-              // 嵌入内层钳制：给 FTS 降级留出总预算内的时间（远程限 HTTP fetch；本地经 worker 代理 race 放弃）
-              embeddingTimeoutMs: RECALL_EMBED_CAP_MS,
-              visibleSessionIds: lineage?.ancestors(payload.agent.id) ?? [payload.agent.id],
-              visiblePresetId: lineage?.presetOf(payload.agent.id),
+            Promise.all([
+              stores.l1.search(query, resultLimit, {
+                scoreThreshold: cfg.recall.scoreThreshold,
+                strictThreshold: true,
+                family: mode === 'auto' ? undefined : mode,
+                // 嵌入内层钳制：给 FTS 降级留出总预算内的时间（远程限 HTTP fetch；本地经 worker 代理 race 放弃）
+                embeddingTimeoutMs: RECALL_EMBED_CAP_MS,
+                visibleSessionIds,
+                visiblePresetId: lineage?.presetOf(payload.agent.id),
+              }),
+              Promise.resolve(cfg.archive?.autoRecall && stores.archive
+                ? stores.archive.search(query, 1, visibleSessionIds, true)
+                : []),
+            ]).then(([memoryHits, archiveHits]) => {
+              const archives = archiveHits.map((hit) => ({
+                id: hit.id,
+                content: `${hit.summary}\n（档案 ${hit.id}；需要原话时调用 conversation_search 并传 archive_id）`,
+                type: 'archive',
+                scene_name: `${new Date(hit.bucketStart).toISOString()}..${new Date(hit.latestAt).toISOString()}`,
+                score: hit.score,
+              }));
+              // 档案命中严格过滤后优先占一个槽；余量留给稳定 L1，避免两类互相挤没。
+              return [...archives, ...memoryHits].slice(0, resultLimit);
             }),
             cfg.recall.timeoutMs,
           );
@@ -366,7 +384,7 @@ export function registerRecall(
             '</relevant-memories>',
           ].join('\n');
           logger.info(
-            `[memory] 召回注入 ${lines.length} 条 L1（mode=${mode}，query="${query.slice(0, 30).replace(/\n/g, ' ')}…"，agent=${payload.agent.id}，消息侧）`,
+            `[memory] 召回注入 ${lines.length} 条记忆/档案（mode=${mode}，query="${query.slice(0, 30).replace(/\n/g, ' ')}…"，agent=${payload.agent.id}，消息侧）`,
           );
           const injection = createUserMessage({
             content: [{ type: 'text', text }],

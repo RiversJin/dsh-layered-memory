@@ -19,7 +19,14 @@ import { existsSync, mkdirSync } from 'node:fs';
 import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { EmbeddingProviderInfo } from './embedding.js';
-import type { L0MessageRecord, MemoryFamily, MemoryLogger, MemoryRecord } from '../types.js';
+import type {
+  ArchiveSearchHit,
+  ArchiveSegmentRecord,
+  L0MessageRecord,
+  MemoryFamily,
+  MemoryLogger,
+  MemoryRecord,
+} from '../types.js';
 import { familyForType } from '../types.js';
 import { bm25RankToScore, buildFtsQuery, tokenizeForFts } from './search-utils.js';
 import { describeTokenizer, ensureTokenizer, tokenizerStamp } from '../util/tokenizer.js';
@@ -130,6 +137,12 @@ export class MemoryDb {
   private stmtL0FtsInsert!: StatementLike;
   private stmtL0FtsDelete!: StatementLike;
   private stmtL0FtsSearch!: StatementLike;
+
+  private stmtUpsertArchive!: StatementLike;
+  private stmtArchiveExists!: StatementLike;
+  private stmtArchiveFtsInsert!: StatementLike;
+  private stmtArchiveFtsDelete!: StatementLike;
+  private stmtArchiveFtsSearch!: StatementLike;
 
   constructor(dbPath: string, dimensions: number, logger?: MemoryLogger) {
     this.dimensions = dimensions;
@@ -408,6 +421,42 @@ export class MemoryDb {
     );
     this.stmtL0Exists = this.db.prepare('SELECT 1 FROM l0_conversations WHERE record_id = ?');
     this.prepareL0VecStatements();
+
+    // ── 压缩归档索引（梗概 + L0 原文引用；不混入 L1 长期事实） ──
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS archive_segments (
+        segment_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        bucket_start INTEGER NOT NULL,
+        latest_at INTEGER NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        source_text TEXT NOT NULL DEFAULT '',
+        message_ids_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'pending',
+        summary_version INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `);
+    if (!this.hasColumn('archive_segments', 'summary_version')) {
+      this.db.exec('ALTER TABLE archive_segments ADD COLUMN summary_version INTEGER NOT NULL DEFAULT 0');
+    }
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_archive_session_time ON archive_segments(session_id, bucket_start, latest_at)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_archive_status ON archive_segments(status)');
+    this.stmtUpsertArchive = this.db.prepare(`
+      INSERT INTO archive_segments (
+        segment_id, session_id, bucket_start, latest_at, summary, source_text,
+        message_ids_json, status, summary_version, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(segment_id) DO UPDATE SET
+        summary=excluded.summary,
+        source_text=excluded.source_text,
+        message_ids_json=excluded.message_ids_json,
+        status=excluded.status,
+        summary_version=excluded.summary_version,
+        updated_at=excluded.updated_at
+    `);
+    this.stmtArchiveExists = this.db.prepare('SELECT 1 FROM archive_segments WHERE segment_id = ?');
     // ── token_cost：蒸馏成本明细表（成本账本自治；见 cost-ledger.ts） ──
     this.costLedger.init(this.db, this.logger);
 
@@ -432,6 +481,12 @@ export class MemoryDb {
         this.db.exec('DROP TABLE l0_fts');
         l0FtsRebuilt = true;
         this.logger?.info(`${TAG} l0_fts 分词器已变更（${savedStamp} → ${wantStamp}），重建全文索引`);
+      }
+      let archiveFtsRebuilt = false;
+      if (this.tableExists('archive_fts') && tokenizerChanged) {
+        this.db.exec('DROP TABLE archive_fts');
+        archiveFtsRebuilt = true;
+        this.logger?.info(`${TAG} archive_fts 分词器已变更（${savedStamp} → ${wantStamp}），重建全文索引`);
       }
       this.db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS l1_fts USING fts5(
@@ -459,6 +514,16 @@ export class MemoryDb {
           role UNINDEXED,
           recorded_at UNINDEXED,
           timestamp UNINDEXED
+        )
+      `);
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS archive_fts USING fts5(
+          summary,
+          summary_original UNINDEXED,
+          segment_id UNINDEXED,
+          session_id UNINDEXED,
+          bucket_start UNINDEXED,
+          latest_at UNINDEXED
         )
       `);
 
@@ -503,6 +568,20 @@ export class MemoryDb {
         LIMIT ?
       `);
       if (l0FtsRebuilt) this.backfillL0Fts();
+      this.stmtArchiveFtsInsert = this.db.prepare(`
+        INSERT INTO archive_fts (summary, summary_original, segment_id, session_id, bucket_start, latest_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      this.stmtArchiveFtsDelete = this.db.prepare('DELETE FROM archive_fts WHERE segment_id = ?');
+      this.stmtArchiveFtsSearch = this.db.prepare(`
+        SELECT segment_id, summary_original AS summary, session_id, bucket_start, latest_at,
+               bm25(archive_fts) AS rank
+        FROM archive_fts
+        WHERE archive_fts MATCH ?
+        ORDER BY rank ASC
+        LIMIT ?
+      `);
+      if (archiveFtsRebuilt) this.backfillArchiveFts();
       // 戳如实记录"构建当前 FTS 内容的分词器"（含全新空表：后续写入即该分词器）
       try {
         this.writeMetaString('fts_tokenizer', wantStamp);
@@ -657,6 +736,30 @@ export class MemoryDb {
       }
     }
     if (count > 0) this.logger?.info(`${TAG} l0_fts 回灌 ${count} 行`);
+  }
+
+  /** 重建后的 archive_fts 从 ready 梗概回灌。 */
+  private backfillArchiveFts(): void {
+    let count = 0;
+    const stmt = this.db.prepare(
+      "SELECT segment_id, session_id, bucket_start, latest_at, summary FROM archive_segments WHERE status = 'ready' AND summary != ''",
+    );
+    for (const r of stmt.iterate() as Iterable<Record<string, unknown>>) {
+      try {
+        this.stmtArchiveFtsInsert.run(
+          tokenizeForFts(String(r.summary ?? '')),
+          String(r.summary ?? ''),
+          String(r.segment_id ?? ''),
+          String(r.session_id ?? ''),
+          Number(r.bucket_start ?? 0),
+          Number(r.latest_at ?? 0),
+        );
+        count++;
+      } catch {
+        /* 单行失败跳过 */
+      }
+    }
+    if (count > 0) this.logger?.info(`${TAG} archive_fts 回灌 ${count} 行`);
   }
 
   private readEmbeddingMeta(): EmbeddingMeta | undefined {
@@ -1131,6 +1234,162 @@ export class MemoryDb {
       this.logger?.warn(`${TAG} L0 批量写入失败: ${err instanceof Error ? err.message : String(err)}`);
       return false;
     }
+  }
+
+  /** L0 主键是否存在（压缩回填的 JSONL 幂等门）。 */
+  hasL0(id: string): boolean {
+    if (this.degraded) return false;
+    try {
+      return this.stmtL0Exists.get(id) !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  /** 按消息 id 批量读取 L0，返回顺序按 timestamp。 */
+  getL0ByIds(ids: readonly string[]): L0MessageRecord[] {
+    if (this.degraded || ids.length === 0) return [];
+    const out: L0MessageRecord[] = [];
+    try {
+      for (const chunk of chunkIds([...new Set(ids)])) {
+        const ph = chunk.map(() => '?').join(',');
+        const rows = this.db.prepare(
+          `SELECT record_id, session_id, role, message_text, recorded_at, timestamp
+           FROM l0_conversations WHERE record_id IN (${ph})`,
+        ).all(...chunk) as Array<{
+          record_id: string;
+          session_id: string;
+          role: string;
+          message_text: string;
+          recorded_at: string;
+          timestamp: number;
+        }>;
+        out.push(...rows.map((r) => ({
+          id: r.record_id,
+          sessionId: r.session_id,
+          role: r.role as L0MessageRecord['role'],
+          content: r.message_text,
+          recordedAt: r.recorded_at,
+          timestamp: r.timestamp ?? 0,
+        })));
+      }
+      return out.sort((a, b) => a.timestamp - b.timestamp);
+    } catch (err) {
+      this.logger?.warn(`${TAG} L0 按 id 读取失败（返回空）: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  }
+
+  // ============================
+  // 压缩归档梗概
+  // ============================
+
+  upsertArchive(record: ArchiveSegmentRecord): boolean {
+    if (this.degraded) return false;
+    try {
+      this.db.exec('BEGIN');
+      const ftsExisted = this.ftsAvailable ? this.stmtArchiveExists.get(record.id) !== undefined : false;
+      this.stmtUpsertArchive.run(
+        record.id,
+        record.sessionId,
+        record.bucketStart,
+        record.latestAt,
+        record.summary,
+        record.sourceText,
+        JSON.stringify(record.messageIds),
+        record.status,
+        record.summaryVersion ?? 0,
+        record.createdAt,
+        record.updatedAt,
+      );
+      if (this.ftsAvailable) {
+        if (ftsExisted) this.stmtArchiveFtsDelete.run(record.id);
+        if (record.status === 'ready' && record.summary.trim()) {
+          this.stmtArchiveFtsInsert.run(
+            tokenizeForFts(record.summary),
+            record.summary,
+            record.id,
+            record.sessionId,
+            record.bucketStart,
+            record.latestAt,
+          );
+        }
+      }
+      this.db.exec('COMMIT');
+      return true;
+    } catch (err) {
+      try { this.db.exec('ROLLBACK'); } catch { /* ignore */ }
+      this.logger?.warn(`${TAG} 压缩归档写入失败: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  getArchive(id: string): ArchiveSegmentRecord | undefined {
+    if (this.degraded) return undefined;
+    try {
+      const row = this.db.prepare(
+        `SELECT segment_id, session_id, bucket_start, latest_at, summary, source_text,
+                message_ids_json, status, summary_version, created_at, updated_at
+         FROM archive_segments WHERE segment_id = ?`,
+      ).get(id) as ArchiveRow | undefined;
+      return row ? rowToArchive(row) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  listArchivesNeedingSummary(summaryVersion: number): ArchiveSegmentRecord[] {
+    if (this.degraded) return [];
+    try {
+      const rows = this.db.prepare(
+        `SELECT segment_id, session_id, bucket_start, latest_at, summary, source_text,
+                message_ids_json, status, summary_version, created_at, updated_at
+         FROM archive_segments
+         WHERE status = 'pending' OR summary_version < ?
+         ORDER BY bucket_start ASC`,
+      ).all(summaryVersion) as unknown as ArchiveRow[];
+      return rows.map(rowToArchive);
+    } catch {
+      return [];
+    }
+  }
+
+  searchArchiveFts(query: string, topK: number): ArchiveSearchHit[] {
+    if (this.degraded || !this.ftsAvailable || topK <= 0) return [];
+    const ftsQuery = buildFtsQuery(query);
+    if (!ftsQuery) return [];
+    try {
+      const rows = this.stmtArchiveFtsSearch.all(ftsQuery, topK) as Array<{
+        segment_id: string;
+        summary: string;
+        session_id: string;
+        bucket_start: number;
+        latest_at: number;
+        rank: number;
+      }>;
+      return rows.flatMap((r) => {
+        const full = this.getArchive(r.segment_id);
+        return full ? [{ ...full, score: bm25RankToScore(r.rank) }] : [];
+      });
+    } catch (err) {
+      this.logger?.warn(`${TAG} 压缩归档检索失败（返回空）: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  }
+
+  archiveReferencedMessageIds(): Set<string> {
+    const out = new Set<string>();
+    if (this.degraded) return out;
+    try {
+      const rows = this.db.prepare('SELECT message_ids_json FROM archive_segments').all() as Array<{ message_ids_json: string }>;
+      for (const row of rows) {
+        try {
+          const ids = JSON.parse(row.message_ids_json || '[]') as unknown;
+          if (Array.isArray(ids)) for (const id of ids) if (typeof id === 'string') out.add(id);
+        } catch { /* 坏 JSON 容忍 */ }
+      }
+    } catch { /* 降级为空保护集 */ }
+    return out;
   }
 
   /** 记录一次蒸馏调用成本（委托 cost-ledger；语义见 CostLedger.insertCostCall）。 */
@@ -1617,6 +1876,43 @@ interface L1MetaRow {
   session_id?: string;
   scope?: string;
   source_message_ids_json?: string;
+}
+
+interface ArchiveRow {
+  segment_id: string;
+  session_id: string;
+  bucket_start: number;
+  latest_at: number;
+  summary: string;
+  source_text: string;
+  message_ids_json: string;
+  status: string;
+  summary_version: number;
+  created_at: number;
+  updated_at: number;
+}
+
+function rowToArchive(row: ArchiveRow): ArchiveSegmentRecord {
+  let messageIds: string[] = [];
+  try {
+    const parsed = JSON.parse(row.message_ids_json || '[]') as unknown;
+    if (Array.isArray(parsed)) messageIds = parsed.filter((v): v is string => typeof v === 'string');
+  } catch {
+    /* 坏 JSON 容忍 */
+  }
+  return {
+    id: row.segment_id,
+    sessionId: row.session_id,
+    bucketStart: row.bucket_start,
+    latestAt: row.latest_at,
+    summary: row.summary,
+    sourceText: row.source_text,
+    messageIds,
+    status: row.status === 'ready' ? 'ready' : 'pending',
+    summaryVersion: row.summary_version ?? 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function rowToRecord(row: L1MetaRow): MemoryRecord {

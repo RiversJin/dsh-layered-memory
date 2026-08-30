@@ -31,6 +31,16 @@ export interface MemoryConfig {
         /** L0 可检索保留天数；被 L1 source_message_ids 引用的证据不清理，0=永久。 */
         retentionDays: number;
     };
+    archive: {
+        /** 压缩时把离开活跃窗口的原文回填 L0，并生成可召回梗概。 */
+        enabled: boolean;
+        /** 是否让档案梗概参与每步自动召回；关闭后仍可由 conversation_search 显式查找。 */
+        autoRecall: boolean;
+        /** 每个语义归档段的原文字符预算；只在消息边界切分。 */
+        maxSegmentChars: number;
+        /** 单条归档梗概的最大字符数。 */
+        maxSummaryChars: number;
+    };
     extract: {
         enabled: boolean;
         /** 稳态触发阈值：单会话攒够多少条新消息才跑一次 L1 抽取（省 token）。
@@ -165,6 +175,17 @@ export declare const memorySchema: Schema<Schemastery.ObjectS<{
         includeReasoning: Schema<boolean, boolean>;
         indexEmbeddings: Schema<boolean, boolean>;
         retentionDays: Schema<number, number>;
+    }>>;
+    archive: Schema<Schemastery.ObjectS<{
+        enabled: Schema<boolean, boolean>;
+        autoRecall: Schema<boolean, boolean>;
+        maxSegmentChars: Schema<number, number>;
+        maxSummaryChars: Schema<number, number>;
+    }>, Schemastery.ObjectT<{
+        enabled: Schema<boolean, boolean>;
+        autoRecall: Schema<boolean, boolean>;
+        maxSegmentChars: Schema<number, number>;
+        maxSummaryChars: Schema<number, number>;
     }>>;
     extract: Schema<Schemastery.ObjectS<{
         enabled: Schema<boolean, boolean>;
@@ -416,6 +437,17 @@ export declare const memorySchema: Schema<Schemastery.ObjectS<{
         includeReasoning: Schema<boolean, boolean>;
         indexEmbeddings: Schema<boolean, boolean>;
         retentionDays: Schema<number, number>;
+    }>>;
+    archive: Schema<Schemastery.ObjectS<{
+        enabled: Schema<boolean, boolean>;
+        autoRecall: Schema<boolean, boolean>;
+        maxSegmentChars: Schema<number, number>;
+        maxSummaryChars: Schema<number, number>;
+    }>, Schemastery.ObjectT<{
+        enabled: Schema<boolean, boolean>;
+        autoRecall: Schema<boolean, boolean>;
+        maxSegmentChars: Schema<number, number>;
+        maxSummaryChars: Schema<number, number>;
     }>>;
     extract: Schema<Schemastery.ObjectS<{
         enabled: Schema<boolean, boolean>;

@@ -76,7 +76,7 @@ export class L0Store {
             this.logger?.warn(`[memory] 旧版 L0 数据导入失败: ${err instanceof Error ? err.message : String(err)}`);
         }
     }
-    async append(sessionId, messages) {
+    async append(sessionId, messages, indexEmbeddings = this.indexEmbeddings) {
         if (messages.length === 0)
             return;
         const records = messages.map((m) => ({
@@ -101,11 +101,23 @@ export class L0Store {
         // 检索引擎：DB + 向量（嵌入失败只跳过向量，不影响元数据/FTS，backfill 补齐）。
         // 双写失败闭环：JSONL 事实源已先行追加，DB 缺行 = 这些消息检索不可见
         // （conversation_search / 蒸馏背景参考都查不到）——升 error 并给自愈指引。
-        const vecs = this.indexEmbeddings ? await this.helper.batch(records.map((r) => r.content)) : undefined;
+        const vecs = indexEmbeddings ? await this.helper.batch(records.map((r) => r.content)) : undefined;
         if (!this.db.upsertL0Batch(records, vecs)) {
             this.logger?.error(`[memory] L0 检索库批量写入失败（${records.length} 条，JSONL 事实源完好），` +
                 '这些消息暂不可检索；可在设置页运行「重建记忆」修复');
         }
+    }
+    /** 压缩归档回填：只写尚未捕获的消息，避免 JSONL 事实源重复；默认不在压缩路径同步跑嵌入。 */
+    async appendMissing(sessionId, messages, indexEmbeddings = false) {
+        const missing = messages.filter((m) => !this.db.hasL0(m.id));
+        if (missing.length === 0)
+            return 0;
+        await this.append(sessionId, missing, indexEmbeddings);
+        return missing.length;
+    }
+    /** 档案 id → 原始消息读取。 */
+    getByIds(ids) {
+        return this.db.getL0ByIds(ids);
     }
     /** 今日已捕获消息数（SQL 计数，不再读整文件）。 */
     async countToday() {

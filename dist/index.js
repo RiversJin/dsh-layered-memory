@@ -20,6 +20,7 @@ import * as path from 'node:path';
 import { memorySchema, resolveDataDir } from './config.js';
 import { registerBenchControl } from './bench-control.js';
 import { registerCapture } from './hooks/capture.js';
+import { registerArchiveCapture } from './hooks/archive.js';
 import { registerRecall } from './hooks/recall.js';
 import { MemoryRunner } from './pipeline/runner.js';
 import { RebuildController } from './pipeline/rebuild.js';
@@ -31,6 +32,7 @@ import { ModelDownloadQueue } from './store/download-queue.js';
 import { PINNED_TRANSFORMERS_VERSION, RuntimeInstaller } from './store/runtime-installer.js';
 import { ensureDir } from './store/io.js';
 import { L0Store } from './store/l0.js';
+import { ArchiveStore } from './store/archive.js';
 import { L1Store } from './store/l1.js';
 import { PersonaStore } from './store/persona.js';
 import { MemoryDb } from './store/sqlite.js';
@@ -150,8 +152,10 @@ export async function apply(ctx, config) {
             logger.error(`[memory] 检索库打开失败，记忆功能停用: ${err instanceof Error ? err.message : String(err)}`);
         }
     }
+    const l0 = new L0Store(dataDir, db, embed, logger, config.capture.indexEmbeddings);
     const stores = {
-        l0: new L0Store(dataDir, db, embed, logger, config.capture.indexEmbeddings),
+        l0,
+        archive: new ArchiveStore(dataDir, db, l0, ctx, () => effectiveCfg(config, live), logger),
         l1: new L1Store(dataDir, db, embed, config.recall.strategy, logger, config.recall.decayHalfLifeDays),
         // L2/L3 分族隔离：各自目录与文件（scenes/chat|work、persona-chat|work.md）
         scenes: {
@@ -168,6 +172,7 @@ export async function apply(ctx, config) {
         try {
             await Promise.all([
                 stores.l0.init(),
+                stores.archive.init(),
                 stores.l1.init(),
                 stores.scenes.chat.init(),
                 stores.scenes.work.init(),
@@ -183,7 +188,11 @@ export async function apply(ctx, config) {
     // L0 默认 90 天：启动后清一次，之后每日清理；L1 引用的证据永久豁免。
     if (storageOk && config.capture.retentionDays > 0) {
         const pruneL0 = () => {
-            void stores.l0.prune(config.capture.retentionDays, stores.l1.referencedMessageIds())
+            const protectedIds = new Set([
+                ...stores.l1.referencedMessageIds(),
+                ...stores.archive.referencedMessageIds(),
+            ]);
+            void stores.l0.prune(config.capture.retentionDays, protectedIds)
                 .then((n) => { if (n > 0)
                 logger.info(`[memory] L0 过期清理 ${n} 条（被 L1 引用证据已保留）`); })
                 .catch((err) => logger.warn(`[memory] L0 过期清理失败（非致命）: ${errDetail(err)}`));
@@ -333,8 +342,10 @@ export async function apply(ctx, config) {
         ? new RebuildController(ctx, config, stores, db, runner, logger, live)
         : undefined;
     let flushL0;
+    let flushArchive;
     if (storageOk) {
         flushL0 = registerCapture(ctx, config, runner, stores.l0, logger, live, modes, lineage);
+        flushArchive = registerArchiveCapture(ctx, config, stores.archive, logger, modes, lineage);
     }
     const recall = registerRecall(ctx, config, stores, logger, live, modes, dataDir, lineage);
     runner.setAfterRun(recall.invalidateProfile);
@@ -367,10 +378,11 @@ export async function apply(ctx, config) {
     ctx.effect(() => () => {
         disposed = true;
         runner.stop();
+        stores.archive.close();
         embedManager?.dispose();
         downloader.dispose();
         return (async () => {
-            await flushL0?.();
+            await Promise.all([flushL0?.(), flushArchive?.()]);
             await Promise.all([modes.flush(), lineage.flush()]);
             db.close();
             resetTokenCost();

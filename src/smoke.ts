@@ -36,6 +36,7 @@ import {
   type InitialEmbedding,
 } from './store/embedding-source.js';
 import { L0Store } from './store/l0.js';
+import { ArchiveStore, ARCHIVE_PERIOD_MS, packArchiveSegments, truncateArchiveSummary } from './store/archive.js';
 import { L1Store } from './store/l1.js';
 import {
   LocalEmbeddingService,
@@ -951,8 +952,9 @@ async function main(): Promise<void> {
       const dbT = new MemoryDb(path.join(tmpTool, 'memory.db'), 0, silentLogger);
       dbT.init();
       const l0T = new L0Store(tmpTool, dbT, undefined, silentLogger);
+      const archiveT = new ArchiveStore(tmpTool, dbT, l0T, {} as never, () => ({ archive: { maxSegmentChars: 48_000 } } as never), silentLogger);
       const l1T = new L1Store(tmpTool, dbT, undefined, 'keyword', silentLogger);
-      await Promise.all([l0T.init(), l1T.init()]);
+      await Promise.all([l0T.init(), archiveT.init(), l1T.init()]);
       const scenesT = { chat: new SceneStore(tmpTool, 'chat', silentLogger), work: new SceneStore(tmpTool, 'work', silentLogger) };
       const personaT = { chat: new PersonaStore(tmpTool, 'chat'), work: new PersonaStore(tmpTool, 'work') };
       await Promise.all([scenesT.chat.init(), scenesT.work.init(), personaT.chat.init(), personaT.work.init()]);
@@ -972,7 +974,7 @@ async function main(): Promise<void> {
         },
       } as never;
       const toolGlobalRecall = { value: true };
-      registerMemoryTools(ctxT, { tools: true } as never, { l0: l0T, l1: l1T, scenes: scenesT, persona: personaT }, silentLogger, modesT, { supported: true, get: () => ({ recall: toolGlobalRecall.value }) } as never);
+      registerMemoryTools(ctxT, { tools: true } as never, { archive: archiveT, l0: l0T, l1: l1T, scenes: scenesT, persona: personaT }, silentLogger, modesT, { supported: true, get: () => ({ recall: toolGlobalRecall.value }) } as never);
       assert(Object.keys(specs).length === 4 && !!specs['memory_commit'], '四工具注册（含显式 memory_commit）');
       assert(
         specs['memory_search'].description.includes('每轮合计最多调用 3 次')
@@ -1011,6 +1013,7 @@ async function main(): Promise<void> {
       const msG = await specs['memory_search'].execute({ query: 'emoji' }, { agent: { id: 'sess-wo' } }) as { items: unknown[]; notice?: string };
       assert(msG.items.length === 0 && (msG.notice as string).includes('全局') && !(msG.notice as string).includes('只写'), '全局召回关拒读且归因全局（不谎报只写）');
       toolGlobalRecall.value = true;
+      await archiveT.close();
       dbT.close();
     } finally {
       await fs.rm(tmpTool, { recursive: true, force: true }).catch(() => {});
@@ -4096,6 +4099,8 @@ async function main(): Promise<void> {
       const l0 = new L0Store(tmp34, db, undefined, silentLogger, false);
       const l1 = new L1Store(tmp34, db, undefined, 'keyword', silentLogger);
       await Promise.all([l0.init(), l1.init()]);
+      const archive = new ArchiveStore(tmp34, db, l0, {} as never, () => ({ archive: { maxSegmentChars: 48_000 } } as never), silentLogger);
+      await archive.init();
       const now = Date.now();
       await l0.append('root', [{ id: 'l0-root', role: 'user', content: '谱系测试共同关键词 根记录', timestamp: now }]);
       await l0.append('child-a', [{ id: 'l0-a', role: 'user', content: '谱系测试共同关键词 A记录', timestamp: now + 1 }]);
@@ -4137,7 +4142,7 @@ async function main(): Promise<void> {
       const personas = { chat: new PersonaStore(tmp34, 'chat'), work: new PersonaStore(tmp34, 'work') };
       await Promise.all([scenes.chat.init(), scenes.work.init(), personas.chat.init(), personas.work.init()]);
       modes.set('child-a', 'auto');
-      registerMemoryTools(toolCtx, { tools: true } as never, { l0, l1, scenes, persona: personas }, silentLogger, modes, { supported: true, get: () => ({ recall: true }) } as never, lineage);
+      registerMemoryTools(toolCtx, { tools: true } as never, { archive, l0, l1, scenes, persona: personas }, silentLogger, modes, { supported: true, get: () => ({ recall: true }) } as never, lineage);
       const commit = specs.memory_commit as {
         execute(args: Record<string, unknown>, exec: { agent: { id: string; session: { events: SessionEvent[] } } }): Promise<{ status: string; id: string; scope: string }>;
       };
@@ -4173,10 +4178,57 @@ async function main(): Promise<void> {
       await l0.prune(90, l1.referencedMessageIds());
       assert((await l0.search('过期证据保护关键词', 5, ['child-a'])).some((r) => r.id === 'old-protected'), 'L1 引用的过期 L0 证据保留');
       assert(!(await l0.search('过期普通清理关键词', 5, ['child-a'])).some((r) => r.id === 'old-expired'), '未引用过期 L0 从检索库清理');
+      archive.close();
       db.close();
       await Promise.all([lineage.flush(), modes.flush()]);
     } finally {
       await fs.rm(tmp34, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  console.log('== 35. 压缩归档梗概 / L0 原文引用 / 分支隔离 ==');
+  {
+    const tmp35 = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-mem-archive-'));
+    try {
+      const db = new MemoryDb(path.join(tmp35, 'memory.db'), 0, silentLogger);
+      db.init();
+      const l0 = new L0Store(tmp35, db, undefined, silentLogger, false);
+      await l0.init();
+      const archive = new ArchiveStore(tmp35, db, l0, {} as never, () => ({ archive: { maxSegmentChars: 120 } } as never), silentLogger);
+      await archive.init();
+      const base = Math.floor(Date.now() / ARCHIVE_PERIOD_MS) * ARCHIVE_PERIOD_MS - 2 * ARCHIVE_PERIOD_MS;
+      const messages = [
+        { id: 'arc-m1', role: 'user' as const, content: '讨论了视觉压缩字体与中文低分辨率可读性', timestamp: base + 1_000 },
+        { id: 'arc-m2', role: 'assistant' as const, content: '决定使用 Fusion Pixel 12px，并保留英文 OMP 位图', timestamp: base + 2_000 },
+        { id: 'arc-m3', role: 'user' as const, content: '另一个十二小时桶里的远期记忆衰减话题', timestamp: base + ARCHIVE_PERIOD_MS + 1_000 },
+      ];
+      assert(
+        truncateArchiveSummary(`- 第一条完整内容。\n- 第二条完整内容。\n- ${'过长'.repeat(100)}`, 40).endsWith('…')
+        && !truncateArchiveSummary(`- 第一条完整内容。\n- 第二条完整内容。\n- ${'过长'.repeat(100)}`, 40).includes('过长过长过长'),
+        '异常超长梗概按完整行收口而非硬切半句',
+      );
+      await l0.append('root', messages);
+      const packed = packArchiveSegments('root', messages, 120, base + 3 * ARCHIVE_PERIOD_MS);
+      assert(packed.length >= 2 && packed.every((r) => r.status === 'pending'), '按 12h 桶和字符预算切成 pending 档案');
+      const ready = packed.map((record, i) => ({
+        ...record,
+        summary: i === 0 ? '视觉压缩字体测试：中文采用 Fusion Pixel 12px，英文保留 OMP 位图。' : '远期记忆按十二小时周期衰减。',
+        status: 'ready' as const,
+      }));
+      for (const record of ready) assert(db.upsertArchive(record), `归档段 ${record.id} 写入 SQLite`);
+      const hits = archive.search('中文字体 Fusion Pixel', 5, ['root'], true);
+      assert(hits.some((hit) => hit.summary.includes('Fusion Pixel')), '档案梗概可用 FTS 语义关键词召回');
+      assert(archive.search('中文字体 Fusion Pixel', 5, ['sibling'], true).length === 0, '档案梗概隔离兄弟分支');
+      const exact = archive.messages(ready[0].id);
+      assert(
+        ready[0].messageIds.every((id) => exact.some((message) => message.id === id)),
+        '档案 id 可回读该段引用的全部 L0 原始消息',
+      );
+      assert(archive.referencedMessageIds().has('arc-m1'), '档案引用纳入 L0 保留保护集');
+      await archive.close();
+      db.close();
+    } finally {
+      await fs.rm(tmp35, { recursive: true, force: true }).catch(() => {});
     }
   }
 

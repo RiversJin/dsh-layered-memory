@@ -35,6 +35,16 @@ export interface MemoryConfig {
     /** L0 可检索保留天数；被 L1 source_message_ids 引用的证据不清理，0=永久。 */
     retentionDays: number;
   };
+  archive: {
+    /** 压缩时把离开活跃窗口的原文回填 L0，并生成可召回梗概。 */
+    enabled: boolean;
+    /** 是否让档案梗概参与每步自动召回；关闭后仍可由 conversation_search 显式查找。 */
+    autoRecall: boolean;
+    /** 每个语义归档段的原文字符预算；只在消息边界切分。 */
+    maxSegmentChars: number;
+    /** 单条归档梗概的最大字符数。 */
+    maxSummaryChars: number;
+  };
   extract: {
     enabled: boolean;
     /** 稳态触发阈值：单会话攒够多少条新消息才跑一次 L1 抽取（省 token）。
@@ -158,6 +168,12 @@ export const memorySchema = Schema.object({
     includeReasoning: Schema.boolean().default(false),
     indexEmbeddings: Schema.boolean().default(false),
     retentionDays: Schema.number().min(0).max(3650).default(90),
+  }),
+  archive: Schema.object({
+    enabled: Schema.boolean().default(true),
+    autoRecall: Schema.boolean().default(true),
+    maxSegmentChars: Schema.number().min(2000).max(200_000).default(48_000),
+    maxSummaryChars: Schema.number().min(200).max(10_000).default(1200),
   }),
   extract: Schema.object({
     // 长期记忆默认由模型显式 memory_commit；自动抽取仅作兼容开关。

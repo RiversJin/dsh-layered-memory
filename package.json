@@ -1,7 +1,7 @@
 {
   "name": "dsh-layered-memory",
-  "version": "0.8.11-rivers.3",
-  "description": "Fork-aware layered memory for DeepSeek Harness: automatic searchable L0, explicit L1 commits, lineage-isolated recall, and optional legacy L1-L3 distillation.",
+  "version": "0.8.11-rivers.4",
+  "description": "Fork-aware layered memory for DeepSeek Harness: searchable L0, recoverable compaction archives, explicit L1 commits, lineage-isolated recall, and optional legacy L1-L3 distillation.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

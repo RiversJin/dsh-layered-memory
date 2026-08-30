@@ -7,9 +7,11 @@
 
 **DeepSeek Harness 的分层蒸馏记忆插件：对话在后台自动完成 L0 捕获 → L1 原子记忆 → L2 场景整合 → L3 画像蒸馏，模型每一步前自动把相关记忆注入上下文。**
 
-> Rivers fork 默认采用显式长期记忆：L0 自动捕获并用 FTS 检索，L1 由模型通过
+> Rivers fork 默认采用显式长期记忆：L0 自动捕获并用 FTS/向量检索，L1 由模型通过
 > `memory_commit` 主动提交；自动 L1 抽取默认关闭。fork 子会话只记录新增部分，召回与
 > 搜索可见范围为 global + 当前分支 + 祖先，兄弟分支隔离；子会话继承父会话记忆档位。
+> 上下文压缩时，退出近期窗口的消息另存为 12 小时档案梗概；梗概用于定位，原文仍在
+> L0，可按档案 ID 取回。
 
 [English](README.en.md) · [最新发行版](https://github.com/JunNanLYS/dsh-layered-memory/releases/latest) · [反馈问题](https://github.com/JunNanLYS/dsh-layered-memory/issues)
 
@@ -261,6 +263,10 @@ ONNX 量化 **CPU 推理**——无需 API Key，数据不出本机）。本地�
 | `capture.includeReasoning` | `false` | 是否把 reasoning 块写入 L0；默认只保存最终正文 |
 | `capture.indexEmbeddings` | `false` | 是否同步为 L0 生成向量；默认 L0 仅 FTS，避免拖慢每轮落盘 |
 | `capture.retentionDays` | `90` | L0 保留天数；被 L1 证据引用的消息豁免；`0` 永久保留 |
+| `archive.enabled` | `true` | 监听上下文压缩事件，把已关闭的历史时间桶回填到 L0，并生成独立档案梗概；不写入 L1 |
+| `archive.autoRecall` | `true` | 自动召回时允许档案梗概占用最多 1 个结果槽；需要原话时再调用 `conversation_search(archive_id=...)` |
+| `archive.maxSegmentChars` | `48000` | 单个 12 小时档案段送入摘要模型的最大字符数；超限只在消息边界继续分段 |
+| `archive.maxSummaryChars` | `1200` | 单个档案梗概的最大字符数；梗概只作检索索引，原文不受此限制 |
 | `extract.enabled` | `false` | 兼容性的自动 L1 抽取开关；默认改用 `memory_commit` 显式提交 |
 | `extract.minMessages` | `6` | 稳态触发阈值：单会话攒够 N 条新消息跑一次 L1 抽取。起步阶段生效阈值从 1 翻倍爬坡到此值（首轮即出记忆，随后自动攒批省调用） |
 | `extract.idleSeconds` | `300` | 闲置兜底：会话静默 N 秒后把未蒸馏切片落袋（接住"没攒够阈值用户就离开"）；`0` 关闭 |

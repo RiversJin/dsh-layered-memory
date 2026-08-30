@@ -24,6 +24,12 @@ export const memorySchema = Schema.object({
         indexEmbeddings: Schema.boolean().default(false),
         retentionDays: Schema.number().min(0).max(3650).default(90),
     }),
+    archive: Schema.object({
+        enabled: Schema.boolean().default(true),
+        autoRecall: Schema.boolean().default(true),
+        maxSegmentChars: Schema.number().min(2000).max(200_000).default(48_000),
+        maxSummaryChars: Schema.number().min(200).max(10_000).default(1200),
+    }),
     extract: Schema.object({
         // 长期记忆默认由模型显式 memory_commit；自动抽取仅作兼容开关。
         enabled: Schema.boolean().default(false),

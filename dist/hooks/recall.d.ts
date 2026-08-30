@@ -19,6 +19,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { MemoryConfig } from '../config.js';
 import type { LiveSettingsHandle } from '../settings.js';
 import type { L1Store } from '../store/l1.js';
+import type { ArchiveStore } from '../store/archive.js';
 import type { PersonaStore } from '../store/persona.js';
 import type { SceneStore } from '../store/scenes.js';
 import type { SessionModeStore } from '../store/session-modes.js';
@@ -80,6 +81,7 @@ export interface RecallHooks {
     estimateRecallTokens(sessionId: string): Promise<number | null>;
 }
 export declare function registerRecall(ctx: Context, cfg: MemoryConfig, stores: {
+    archive?: ArchiveStore;
     l1: L1Store;
     scenes: Record<'chat' | 'work', SceneStore>;
     persona: Record<'chat' | 'work', PersonaStore>;

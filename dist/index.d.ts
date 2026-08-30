@@ -26,6 +26,17 @@ export declare const Config: import("@deepseek-ai/schemastery").default<Schemast
         indexEmbeddings: import("@deepseek-ai/schemastery").default<boolean, boolean>;
         retentionDays: import("@deepseek-ai/schemastery").default<number, number>;
     }>>;
+    archive: import("@deepseek-ai/schemastery").default<Schemastery.ObjectS<{
+        enabled: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        autoRecall: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        maxSegmentChars: import("@deepseek-ai/schemastery").default<number, number>;
+        maxSummaryChars: import("@deepseek-ai/schemastery").default<number, number>;
+    }>, Schemastery.ObjectT<{
+        enabled: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        autoRecall: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        maxSegmentChars: import("@deepseek-ai/schemastery").default<number, number>;
+        maxSummaryChars: import("@deepseek-ai/schemastery").default<number, number>;
+    }>>;
     extract: import("@deepseek-ai/schemastery").default<Schemastery.ObjectS<{
         enabled: import("@deepseek-ai/schemastery").default<boolean, boolean>;
         minMessages: import("@deepseek-ai/schemastery").default<number, number>;
@@ -276,6 +287,17 @@ export declare const Config: import("@deepseek-ai/schemastery").default<Schemast
         includeReasoning: import("@deepseek-ai/schemastery").default<boolean, boolean>;
         indexEmbeddings: import("@deepseek-ai/schemastery").default<boolean, boolean>;
         retentionDays: import("@deepseek-ai/schemastery").default<number, number>;
+    }>>;
+    archive: import("@deepseek-ai/schemastery").default<Schemastery.ObjectS<{
+        enabled: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        autoRecall: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        maxSegmentChars: import("@deepseek-ai/schemastery").default<number, number>;
+        maxSummaryChars: import("@deepseek-ai/schemastery").default<number, number>;
+    }>, Schemastery.ObjectT<{
+        enabled: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        autoRecall: import("@deepseek-ai/schemastery").default<boolean, boolean>;
+        maxSegmentChars: import("@deepseek-ai/schemastery").default<number, number>;
+        maxSummaryChars: import("@deepseek-ai/schemastery").default<number, number>;
     }>>;
     extract: import("@deepseek-ai/schemastery").default<Schemastery.ObjectS<{
         enabled: import("@deepseek-ai/schemastery").default<boolean, boolean>;

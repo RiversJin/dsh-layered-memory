@@ -13,7 +13,11 @@ export declare class L0Store {
     init(): Promise<void>;
     /** 旧版 l0/*.jsonl 一次性导入检索库，成功后目录改名 l0.imported/。 */
     private importLegacy;
-    append(sessionId: string, messages: ConversationMessage[]): Promise<void>;
+    append(sessionId: string, messages: ConversationMessage[], indexEmbeddings?: boolean): Promise<void>;
+    /** 压缩归档回填：只写尚未捕获的消息，避免 JSONL 事实源重复；默认不在压缩路径同步跑嵌入。 */
+    appendMissing(sessionId: string, messages: ConversationMessage[], indexEmbeddings?: boolean): Promise<number>;
+    /** 档案 id → 原始消息读取。 */
+    getByIds(ids: readonly string[]): L0MessageRecord[];
     /** 今日已捕获消息数（SQL 计数，不再读整文件）。 */
     countToday(): Promise<number>;
     /** 该会话累计已捕获消息数（session-stats 数据源；索引 COUNT）。 */

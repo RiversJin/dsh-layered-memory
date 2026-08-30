@@ -1,5 +1,5 @@
 import type { EmbeddingProviderInfo } from './embedding.js';
-import type { L0MessageRecord, MemoryFamily, MemoryLogger, MemoryRecord } from '../types.js';
+import type { ArchiveSearchHit, ArchiveSegmentRecord, L0MessageRecord, MemoryFamily, MemoryLogger, MemoryRecord } from '../types.js';
 export interface StoreInitResult {
     /** embedding 配置（provider/model/维度）变化，需要后台全量重嵌入。 */
     needsReindex: boolean;
@@ -61,6 +61,11 @@ export declare class MemoryDb {
     private stmtL0FtsInsert;
     private stmtL0FtsDelete;
     private stmtL0FtsSearch;
+    private stmtUpsertArchive;
+    private stmtArchiveExists;
+    private stmtArchiveFtsInsert;
+    private stmtArchiveFtsDelete;
+    private stmtArchiveFtsSearch;
     constructor(dbPath: string, dimensions: number, logger?: MemoryLogger);
     isDegraded(): boolean;
     getCapabilities(): StoreCapabilities;
@@ -94,6 +99,8 @@ export declare class MemoryDb {
     private backfillL1Fts;
     /** 重建后的 l0_fts 从 l0_conversations 全量回灌（仅 drop 重建时调用；iterate 流式防大库内存峰值）。 */
     private backfillL0Fts;
+    /** 重建后的 archive_fts 从 ready 梗概回灌。 */
+    private backfillArchiveFts;
     private readEmbeddingMeta;
     private writeEmbeddingMeta;
     /** 通用字符串 kv（embedding_meta 表兼作元数据 kv 存储，如 FTS 分词器版本戳）。 */
@@ -152,6 +159,15 @@ export declare class MemoryDb {
     searchL1Vector(embedding: Float32Array, topK: number, family?: string): L1SearchHit[];
     /** 批量 upsert L0 消息（元数据 + FTS；embeddings 与 records 等长，可省略）。 */
     upsertL0Batch(records: L0MessageRecord[], embeddings?: Array<Float32Array | undefined>): boolean;
+    /** L0 主键是否存在（压缩回填的 JSONL 幂等门）。 */
+    hasL0(id: string): boolean;
+    /** 按消息 id 批量读取 L0，返回顺序按 timestamp。 */
+    getL0ByIds(ids: readonly string[]): L0MessageRecord[];
+    upsertArchive(record: ArchiveSegmentRecord): boolean;
+    getArchive(id: string): ArchiveSegmentRecord | undefined;
+    listArchivesNeedingSummary(summaryVersion: number): ArchiveSegmentRecord[];
+    searchArchiveFts(query: string, topK: number): ArchiveSearchHit[];
+    archiveReferencedMessageIds(): Set<string>;
     /** 记录一次蒸馏调用成本（委托 cost-ledger；语义见 CostLedger.insertCostCall）。 */
     insertCostCall(provider: string, model: string, layer: string, inputChars: number, outputTokens: number, reasoningTokens: number, retentionDays: number): void;
     /** 查询 token_cost 单窗口聚合（委托 cost-ledger；降级/异常返回零值）。 */
